@@ -1,0 +1,6 @@
+.tmp/
+bin/
+dist/
+~/.arkkb/
+node_modules/
+.DS_Store
