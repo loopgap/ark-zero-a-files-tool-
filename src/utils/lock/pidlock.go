@@ -4,9 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
-	"syscall"
 )
 
 type PIDLock struct {
@@ -48,35 +46,4 @@ func (l *PIDLock) Unlock() error {
 		return os.Remove(l.path)
 	}
 	return nil
-}
-
-func isProcessAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	if runtime.GOOS == "windows" {
-		const STILL_ACTIVE = 259
-		const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-
-		h, err := syscall.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
-		if err != nil {
-			return false
-		}
-		defer syscall.CloseHandle(h)
-
-		var exitCode uint32
-		err = syscall.GetExitCodeProcess(h, &exitCode)
-		if err != nil {
-			return false
-		}
-		return exitCode == STILL_ACTIVE
-	}
-
-	// Unix-like systems
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	err = process.Signal(syscall.Signal(0))
-	return err == nil
 }

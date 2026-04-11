@@ -1,17 +1,11 @@
 package sync
 
 import (
-	"errors"
-	"io/fs"
-	"path/filepath"
 	"sync"
-	"time"
 
+	"arkkb/src/core/config"
 	"arkkb/src/core/storage"
-	"github.com/blugelabs/bluge"
 )
-
-var ErrTooManyChanges = errors.New("too many changes detected, user confirmation required")
 
 type SyncEngine struct {
 	storage *storage.StorageManager
@@ -23,39 +17,21 @@ func NewSyncEngine(mgr *storage.StorageManager) *SyncEngine {
 }
 
 func (s *SyncEngine) OnFocus(workspaceRoot string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	var changedDocs []bluge.Document
-	changeCount := 0
-
-	err := filepath.WalkDir(workspaceRoot, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-
-		info, _ := d.Info()
-		mtime := info.ModTime().Unix()
-
-		doc := bluge.NewDocument(path).
-			AddField(bluge.NewKeywordField("path", path).StoreValue()).
-			AddField(bluge.NewDateTimeField("mtime", time.Unix(mtime, 0)).StoreValue())
-		
-		changedDocs = append(changedDocs, *doc)
-		changeCount++
-
-		if changeCount > 100 {
-			return ErrTooManyChanges
-		}
-		return nil
-	})
-
-	if err == ErrTooManyChanges {
+	cfg, err := s.storage.KV.GetAppConfig()
+	if err != nil {
 		return err
 	}
 
-	if len(changedDocs) > 0 {
-		return s.storage.Index.UpdateBatch(changedDocs)
+	if len(cfg.Workspace.Roots) == 0 && workspaceRoot != "" && workspaceRoot != "." {
+		root := config.NewWorkspaceRoot(workspaceRoot)
+		cfg.Workspace.Roots = []config.WorkspaceRoot{root}
+		cfg.Workspace.ActiveRootID = root.ID
+		cfg.Workspace.DefaultRootID = root.ID
+		cfg.LastWorkspace = workspaceRoot
+		if err := s.storage.KV.SaveAppConfig(cfg); err != nil {
+			return err
+		}
 	}
-	return nil
+
+	return s.SyncWorkspace(cfg)
 }

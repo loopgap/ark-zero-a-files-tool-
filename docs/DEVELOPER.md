@@ -1,43 +1,65 @@
-﻿# 🛠️ ArkKB 技术开发手册
+# ArkKB Developer Notes
 
-本文档深入解析 ArkKB 的核心技术架构，旨在帮助开发者理解并遵循本项目的极致性能与数据安全哲学。
+## 核心结构
 
-## 🛡️ 三段式原子落地 (Atomic Landing)
+- `src/core/storage`
+  - `bbolt` 保存冷配置、最近项、虚拟归档和文件元数据
+  - `Bluge` 保存路径、文件名、正文和归档归属索引
+- `src/core/sync`
+  - 基于窗口焦点触发工作区增量同步
+  - 黑名单目录直接跳过
+  - 超过阈值的大文件只建立基础索引
+- `src/bridge`
+  - 统一暴露工作台接口：工作区、归档、新建、搜索、帮助、读写
+- `frontend/src/features/workbench/WorkbenchApp.tsx`
+  - 单一工作台状态承载 Workspace / Archives / Recent / Help / Search / Tabs
+- `frontend/src-tauri`
+  - Tauri v2 桌面壳、目录选择器和 Go sidecar 启动桥接
+- `scripts/dev.go`
+  - 本地 `doctor/build/release` 与远端 CI/release 共用的构建入口
 
-为了确保数据在保存过程中的绝对安全，ArkKB 采用了三段式原子落地机制。
+## 归档模型
 
-### 1. 机制流程
-1. **同级预写**：在目标文件同一分区/目录下创建 `.tmp` 临时文件（规避跨挂载盘的 O(N) 复制损耗）。
-2. **强制同步**：通过 Go 的 `file.Sync()` 强制将内核缓冲区数据刷入物理磁盘。
-3. **元数据替换**：调用 `os.Rename` 原子级地将临时文件替换为目标文件。
+虚拟归档不是物理目录。
 
-### 2. 异常处理
-若在任何阶段发生故障（如磁盘写满、设备断电），ArkKB 会**冻结现场**。原始文件与 `.tmp` 文件将同时被保留，坚决不输出静默的残次脏数据覆盖原有良好数据。
+- `VirtualFolder`
+  - `workspaceId`
+  - `preferredRootId`
+  - `preferredParentPath`
+- 文件与归档的关系单独保存在 `virtual_memberships`
 
-## 🏗️ 断层占位与虚拟视窗 (Gap Mechanism)
+这样做的目的：
 
-ArkKB 绝不一次性将海量文本加载进内存。
+- 不污染真实目录结构
+- 保留跨目录归档能力
+- 给默认新建目标提供方向性
 
-### 1. 视窗化加载
-前端 CodeMirror 6 (CM6) 与后端通过 `ReadAt` 进行协作。后端仅读取当前视窗所需的文本切片（Chunk）。
+## 默认新建目标
 
-### 2. Gap 占位
-CM6 内存仅容纳当前可视部分的 DOM。对于不可见的大段文本，使用 "Gap"（断层占位符）替代。这实现了内存安全级别的平滑滚动，使 ArkKB 能在极低内存占用的情况下处理超大型文本文件。
+`ResolveDefaultCreateTarget` / `CreateVirtualFile` 的优先级：
 
-## 📡 LSP 生命周期管理 (LSP Lifecycle)
+1. 显式传入的父目录
+2. 当前虚拟归档记住的最近父目录
+3. 当前虚拟归档记住的根目录
+4. 当前活动根目录
+5. 默认根目录
+6. 其他工作区根目录
 
-ArkKB 遵循“按需唤醒，用完即弃”的原则。
+在某个根目录内，如果策略里存在允许目录，则优先尝试这些允许目录。
 
-### 1. 强生命周期绑定
-LSP 进程（如 clangd, gopls）与对应的编辑器 Tab 页严格绑定。
-- **创建**：打开特定类型文件时启动对应 LSP 进程。
-- **销毁**：Tab 页关闭或重载瞬间，立即向 LSP 进程发送 `SIGTERM` 信号。
+## 搜索排序
 
-### 2. 增量通信
-采用 `TextDocumentSyncKind.Incremental` 协议模式。前端仅上报用户键入的变更补丁 (Delta)，绝对禁止全量互灌。
+搜索命中后会继续按以下信号加权：
 
-### 3. 噪音过滤
-强制过滤 LSP 推送的高频 Diagnostics 报文，减少 CPU 占用与 UI 抖动。
+- 最近打开项
+- 当前活动根目录
+- 当前归档
+- 目录白名单
+- 文件类型白名单
+- 命中类型：文件名 > 路径 > 正文
 
----
-*ArkKB - 架构的极致优雅来自对复杂度的深度克制。*
+## 当前边界
+
+- Windows 与 Ubuntu 22.04 都走 Tauri 原生构建链。
+- 远端发布通过 GitHub Actions matrix 同时验证 `windows-latest` 与 `ubuntu-22.04`。
+- LSP 目前仅保留配置入口，编辑器未接入完整诊断/补全流水线。
