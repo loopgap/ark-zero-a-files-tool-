@@ -5,7 +5,7 @@ go 1.26.1
 require (
 	github.com/blugelabs/bluge v0.2.2
 	github.com/wailsapp/wails/v3 v3.0.0-alpha.74
-	github.com/wlynxg/chardet v1.0.4
+	github.com/yuin/goldmark v1.7.16
 	go.etcd.io/bbolt v1.4.3
 )
 

@@ -12,8 +12,7 @@ func OpenWithExternalApp(filePath string) error {
 
 	switch runtime.GOOS {
 	case "windows":
-		// Safe slice arguments (Chapter 6.2)
-		cmd = exec.Command("cmd", "/c", "start", "", filePath)
+		cmd = exec.Command("explorer.exe", filePath)
 	case "darwin":
 		cmd = exec.Command("open", filePath)
 	case "linux":

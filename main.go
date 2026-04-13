@@ -1,100 +1,82 @@
 package main
 
 import (
-	"log"
-	"net/http"
-	"os"
-	"strings"
-
-	"arkkb/src/bridge"
-	"arkkb/src/core/storage"
-	"arkkb/src/core/sync"
-	"arkkb/src/utils/lock"
-
 	"embed"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"time"
 
-	"github.com/wailsapp/wails/v3/pkg/application"
-	"github.com/wailsapp/wails/v3/pkg/events"
+	"arkkb/src/sidecar"
+	"arkkb/src/utils/lock"
 )
 
-//go:embed frontend/dist/*
-var assets embed.FS
+//go:embed docs/*.md
+var docsFS embed.FS
 
 func main() {
-	// 1. PID Lock (Chapter 9.3)
+	setupSidecarLogging()
+	log.Println("sidecar entry starting")
+
 	pidLock, err := lock.NewPIDLock()
+	if err == nil {
+		_ = pidLock.Lock()
+		defer pidLock.Unlock()
+	}
+
+	server, err := sidecar.New(readEmbeddedHelp)
 	if err != nil {
-		log.Fatalf("Failed to initialize PID lock: %v", err)
+		log.Fatalf("failed to start sidecar: %v", err)
 	}
-	if err := pidLock.Lock(); err != nil {
-		log.Fatalf("Application is already running: %v", err)
-	}
-	defer pidLock.Unlock()
+	defer server.Close()
+	go func() {
+		time.Sleep(12 * time.Second)
+		server.RecoverWorkspace()
+	}()
 
-	// 2. Storage Manager (Chapter 7)
-	sm := storage.NewStorageManager()
-	if err := sm.Init(); err != nil {
-		log.Fatalf("Failed to initialize storage: %v", err)
-	}
-	defer sm.Close()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		server.Close()
+		os.Exit(0)
+	}()
 
-	// 3. Sync Engine (Chapter 3.1)
-	syncEngine := sync.NewSyncEngine(sm)
-
-	// 4. Bridge (Chapter 6)
-	br := bridge.NewBridge(sm)
-
-	// 5. Wails Application
-	app := application.New(application.Options{
-		Name:        "ArkKB",
-		Description: "Absolute Lightweight Knowledge Base",
-		Services: []application.Service{
-			application.NewService(br),
-		},
-		Assets: application.AssetOptions{
-			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				// Chapter 4.1: AssetServer Hijacking for Native Streaming
-				if strings.HasPrefix(r.URL.Path, "/file/") {
-					filePath := strings.TrimPrefix(r.URL.Path, "/file/")
-					http.ServeFile(w, r, filePath)
-					return
-				}
-				application.AssetFileServerFS(assets).ServeHTTP(w, r)
-			}),
-		},
-	})
-
-	br.SetApp(app)
-
-	// Focus-Driven Sync (Chapter 3.1)
-	app.On(events.Common.WindowFocus, func(e *application.WailsEvent) {
-		log.Println("[Focus-Driven Sync] 窗口获得焦点：触发目录树 mtime 惰性比对...")
-		wd, _ := os.Getwd()
-		if err := syncEngine.OnFocus(wd); err != nil {
-			if err == sync.ErrTooManyChanges {
-				log.Println("[Sync] 检测到大量文件变更，已发出 UI 提示事件")
-				app.EmitEvent("sync:too_many_changes", nil)
-			} else {
-				log.Printf("[Sync] 同步错误: %v", err)
-			}
-		}
-	})
-
-	app.NewWebviewWindowWithOptions(application.WebviewWindowOptions{
-		Title:  "ArkKB - Minimalist Knowledge Base",
-		Width:  1024,
-		Height: 768,
-		Mac: application.MacWindow{
-			InvisibleTitleBarHeight: 30,
-			TitleBar:                application.MacTitleBarHiddenInset,
-			Appearance:              application.NSAppearanceNameDarkAqua,
-			WebviewIsTransparent:    true,
-			WindowIsTransparent:     true,
-		},
-	})
-
-	err = app.Run()
-	if err != nil {
+	if err := server.ServeRPC(os.Stdin, os.Stdout); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func setupSidecarLogging() {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	logDir := filepath.Join(homeDir, ".arkkb", "logs")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return
+	}
+	logPath := filepath.Join(logDir, "sidecar.log")
+	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return
+	}
+	log.SetOutput(file)
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds | log.Lshortfile)
+	log.Printf("logging initialized: %s", logPath)
+}
+
+func readEmbeddedHelp(docID string) ([]byte, error) {
+	docPath := filepath.Join("docs", "HELP.md")
+	if docID == "developer" {
+		docPath = filepath.Join("docs", "DEVELOPER.md")
+	}
+	data, err := docsFS.ReadFile(docPath)
+	if err == nil {
+		return data, nil
+	}
+	return nil, fmt.Errorf("read help %s: %w", docID, err)
 }
