@@ -35,8 +35,25 @@ jobs:
             echo "publish=false" >> "$GITHUB_OUTPUT"
           fi
 
-  build:
+  validate:
     needs: prepare
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Release preflight
+        env:
+          ARKKB_RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: go run scripts/dev.go preflight
+
+  build:
+    needs:
+      - prepare
+      - validate
     strategy:
       fail-fast: false
       matrix:

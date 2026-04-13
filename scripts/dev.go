@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -46,6 +47,8 @@ func main() {
 		runStress()
 	case "release":
 		runRelease()
+	case "preflight":
+		runPreflight()
 	case "clean":
 		runClean()
 	case "build":
@@ -66,6 +69,7 @@ func printUsage() {
 	fmt.Println("  ci      - CI 管道流水线 (Run full CI pipeline)")
 	fmt.Println("  stress  - 异常仿真测试 (Simulate failures & corruption)")
 	fmt.Println("  release - 生产发布打包 (Package for production)")
+	fmt.Println("  preflight - 发布前校验 (Validate release inputs)")
 	fmt.Println("  build   - 极限构建 (Compile & compress)")
 }
 
@@ -144,6 +148,17 @@ func runStress() {
 
 func runRelease() {
 	fmt.Println("📦 [release] 开始生产级打包...")
+	releaseVersion, err := prepareReleaseVersion()
+	if err != nil {
+		fmt.Printf("❌ 版本准备失败: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("🏷️  [release] 使用版本: %s\n", releaseVersion)
+	if err := runReleasePreflight(releaseVersion); err != nil {
+		fmt.Printf("❌ 发布前校验失败: %v\n", err)
+		os.Exit(1)
+	}
+
 	runDoctor()
 	runFrontendCheck()
 	runTest()
@@ -158,6 +173,21 @@ func runRelease() {
 		os.Exit(1)
 	}
 	fmt.Printf("🎁 发布产物已整理至 %s\n", filepath.Join("bin", "release", targetOS()))
+}
+
+func runPreflight() {
+	fmt.Println("🛂 [preflight] 执行发布前校验...")
+	releaseVersion, err := prepareReleaseVersion()
+	if err != nil {
+		fmt.Printf("❌ 版本准备失败: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("🏷️  [preflight] 使用版本: %s\n", releaseVersion)
+	if err := runReleasePreflight(releaseVersion); err != nil {
+		fmt.Printf("❌ 发布前校验失败: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("✅ 发布前校验通过")
 }
 
 func runBench() {
@@ -236,6 +266,9 @@ func buildDesktop(bundle bool) (buildOutputs, error) {
 	if err := buildFrontCmd.Run(); err != nil {
 		return buildOutputs{}, fmt.Errorf("frontend npm build: %w", err)
 	}
+	if err := ensureDirectoryExists(filepath.Join("frontend", "build")); err != nil {
+		return buildOutputs{}, fmt.Errorf("frontend build output check failed: %w", err)
+	}
 
 	sidecarTarget := filepath.Join("bin", sidecarName())
 	fmt.Println("🔨 [build] 正在构建 Go sidecar...")
@@ -289,17 +322,12 @@ func buildDesktop(bundle bool) (buildOutputs, error) {
 }
 
 func ensureFrontendDeps() {
-	nodeModules := filepath.Join("frontend", "node_modules")
-	if info, err := os.Stat(nodeModules); err == nil && info.IsDir() {
-		return
-	}
-
-	installCmd := exec.Command("npm", "install")
+	installCmd := exec.Command("npm", "ci")
 	installCmd.Dir = "frontend"
 	installCmd.Stdout = os.Stdout
 	installCmd.Stderr = os.Stderr
 	if err := installCmd.Run(); err != nil {
-		fmt.Printf("❌ Frontend npm install 失败: %v\n", err)
+		fmt.Printf("❌ Frontend npm ci 失败: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -557,6 +585,230 @@ func validateSidecarRPC(sidecarBinary string) error {
 	}
 	if help.Result == "" {
 		return fmt.Errorf("sidecar help.read returned empty content")
+	}
+	return nil
+}
+
+func prepareReleaseVersion() (string, error) {
+	version, err := resolveReleaseVersion()
+	if err != nil {
+		return "", err
+	}
+	if err := syncVersionFiles(version); err != nil {
+		return "", err
+	}
+	return version, nil
+}
+
+func resolveReleaseVersion() (string, error) {
+	tag := strings.TrimSpace(os.Getenv("ARKKB_RELEASE_TAG"))
+	if tag != "" {
+		version, err := semverFromTag(tag)
+		if err != nil {
+			return "", err
+		}
+		return version, nil
+	}
+
+	versionBytes, err := os.ReadFile("VERSION")
+	if err != nil {
+		return "", fmt.Errorf("read VERSION: %w", err)
+	}
+	version := strings.TrimSpace(string(versionBytes))
+	if !isSemver(version) {
+		return "", fmt.Errorf("invalid VERSION content: %s", version)
+	}
+	return version, nil
+}
+
+func semverFromTag(tag string) (string, error) {
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return "", fmt.Errorf("release tag is empty")
+	}
+	if !strings.HasPrefix(tag, "v") {
+		return "", fmt.Errorf("release tag must start with v, got %s", tag)
+	}
+	version := strings.TrimPrefix(tag, "v")
+	if !isSemver(version) {
+		return "", fmt.Errorf("release tag must follow vMAJOR.MINOR.PATCH, got %s", tag)
+	}
+	return version, nil
+}
+
+func isSemver(version string) bool {
+	return regexp.MustCompile(`^\d+\.\d+\.\d+$`).MatchString(strings.TrimSpace(version))
+}
+
+func syncVersionFiles(version string) error {
+	if err := os.WriteFile("VERSION", []byte(version+"\n"), 0644); err != nil {
+		return fmt.Errorf("write VERSION: %w", err)
+	}
+
+	if err := updateJSONVersion(filepath.Join("frontend", "package.json"), version); err != nil {
+		return err
+	}
+	if err := updateJSONVersion(filepath.Join("frontend", "src-tauri", "tauri.conf.json"), version); err != nil {
+		return err
+	}
+	if err := updateCargoPackageVersion(filepath.Join("frontend", "src-tauri", "Cargo.toml"), version); err != nil {
+		return err
+	}
+	return nil
+}
+
+func updateJSONVersion(path string, version string) error {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	re := regexp.MustCompile(`(?m)("version"\s*:\s*")([^"]+)(")`)
+	if !re.Match(content) {
+		return fmt.Errorf("version missing in %s", path)
+	}
+	updated := re.ReplaceAll(content, []byte(`${1}`+version+`${3}`))
+	if string(updated) == string(content) {
+		return nil
+	}
+	if err := os.WriteFile(path, updated, 0644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+func updateCargoPackageVersion(path string, version string) error {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	lines := strings.Split(string(content), "\n")
+	inPackage := false
+	updated := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			inPackage = trimmed == "[package]"
+			continue
+		}
+		if inPackage && strings.HasPrefix(trimmed, "version") {
+			lines[i] = "version = \"" + version + "\""
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		return fmt.Errorf("package version not found in %s", path)
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+func runReleasePreflight(expectedVersion string) error {
+	if !isSemver(expectedVersion) {
+		return fmt.Errorf("invalid expected version: %s", expectedVersion)
+	}
+
+	packageVersion, err := readJSONVersion(filepath.Join("frontend", "package.json"))
+	if err != nil {
+		return err
+	}
+	tauriVersion, err := readJSONVersion(filepath.Join("frontend", "src-tauri", "tauri.conf.json"))
+	if err != nil {
+		return err
+	}
+	cargoVersion, err := readCargoPackageVersion(filepath.Join("frontend", "src-tauri", "Cargo.toml"))
+	if err != nil {
+		return err
+	}
+	if packageVersion != expectedVersion || tauriVersion != expectedVersion || cargoVersion != expectedVersion {
+		return fmt.Errorf("version mismatch: expected=%s package.json=%s tauri.conf.json=%s Cargo.toml=%s", expectedVersion, packageVersion, tauriVersion, cargoVersion)
+	}
+
+	if err := validateTauriIcons(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func readJSONVersion(path string) (string, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal(content, &doc); err != nil {
+		return "", fmt.Errorf("parse %s: %w", path, err)
+	}
+	version, ok := doc["version"].(string)
+	if !ok || strings.TrimSpace(version) == "" {
+		return "", fmt.Errorf("version missing in %s", path)
+	}
+	return strings.TrimSpace(version), nil
+}
+
+func readCargoPackageVersion(path string) (string, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	lines := strings.Split(string(content), "\n")
+	inPackage := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			inPackage = trimmed == "[package]"
+			continue
+		}
+		if inPackage && strings.HasPrefix(trimmed, "version") {
+			parts := strings.SplitN(trimmed, "=", 2)
+			if len(parts) != 2 {
+				break
+			}
+			version := strings.TrimSpace(parts[1])
+			version = strings.Trim(version, `"`)
+			if version == "" {
+				break
+			}
+			return version, nil
+		}
+	}
+	return "", fmt.Errorf("package version missing in %s", path)
+}
+
+func validateTauriIcons() error {
+	content, err := os.ReadFile(filepath.Join("frontend", "src-tauri", "tauri.conf.json"))
+	if err != nil {
+		return fmt.Errorf("read tauri config: %w", err)
+	}
+	var tauriConfig struct {
+		Bundle struct {
+			Icon []string `json:"icon"`
+		} `json:"bundle"`
+	}
+	if err := json.Unmarshal(content, &tauriConfig); err != nil {
+		return fmt.Errorf("parse tauri config: %w", err)
+	}
+	if len(tauriConfig.Bundle.Icon) == 0 {
+		return fmt.Errorf("tauri bundle.icon is empty")
+	}
+	for _, icon := range tauriConfig.Bundle.Icon {
+		iconPath := filepath.Join("frontend", "src-tauri", filepath.FromSlash(icon))
+		if err := ensureFileExists(iconPath); err != nil {
+			return fmt.Errorf("icon missing: %s: %w", icon, err)
+		}
+	}
+	return nil
+}
+
+func ensureDirectoryExists(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("expected directory but got file: %s", path)
 	}
 	return nil
 }

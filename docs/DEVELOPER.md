@@ -16,7 +16,7 @@
 - `frontend/src-tauri`
   - Tauri v2 桌面壳、目录选择器和 Go sidecar 启动桥接
 - `scripts/dev.go`
-  - 本地 `doctor/build/release` 与远端 CI/release 共用的构建入口
+  - 本地 `doctor/preflight/build/release` 与远端 CI/release 共用的构建入口
 
 ## 归档模型
 
@@ -63,3 +63,9 @@
 - Windows 与 Ubuntu 22.04 都走 Tauri 原生构建链。
 - 远端发布通过 GitHub Actions matrix 同时验证 `windows-latest` 与 `ubuntu-22.04`。
 - LSP 目前仅保留配置入口，编辑器未接入完整诊断/补全流水线。
+
+## 发布约束
+
+- 发布版本采用 `vX.Y.Z` tag 驱动（例如 `v0.1.0`）。
+- `scripts/dev.go preflight` 会同步并校验版本来源（`VERSION` + 三处版本文件）并检查 Tauri 图标资源，失败立即中止。
+- `.github/workflows/release.yml` 在 matrix build 前执行 preflight，优先拦截版本不一致与资源缺失问题。

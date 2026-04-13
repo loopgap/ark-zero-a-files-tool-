@@ -99,14 +99,32 @@ func (s *Server) startHTTP() error {
 		_, _ = io.WriteString(w, "ok")
 	})
 	mux.HandleFunc("/file/", func(w http.ResponseWriter, r *http.Request) {
-		filePath, _ := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/file/"))
-		http.ServeFile(w, r, filePath)
+		filePath, err := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/file/"))
+		if err != nil {
+			http.Error(w, "invalid file path", http.StatusBadRequest)
+			return
+		}
+		normalizedPath, err := s.Bridge.NormalizeWorkspacePath(filePath)
+		if err != nil {
+			http.Error(w, "file not accessible", http.StatusForbidden)
+			return
+		}
+		http.ServeFile(w, r, filepath.FromSlash(normalizedPath))
 	})
 	mux.HandleFunc("/render/", func(w http.ResponseWriter, r *http.Request) {
-		filePath, _ := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/render/"))
-		htmlBytes, err := render.RenderMarkdown(filePath)
+		filePath, err := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/render/"))
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			http.Error(w, "invalid file path", http.StatusBadRequest)
+			return
+		}
+		normalizedPath, err := s.Bridge.NormalizeWorkspacePath(filePath)
+		if err != nil {
+			http.Error(w, "file not accessible", http.StatusForbidden)
+			return
+		}
+		htmlBytes, err := render.RenderMarkdown(filepath.FromSlash(normalizedPath))
+		if err != nil {
+			http.Error(w, "render failed", http.StatusNotFound)
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -129,7 +147,7 @@ func (s *Server) startHTTP() error {
 		}
 		htmlBytes, err := render.RenderMarkdownBytes(docPath, docBytes)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, "render failed", http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
