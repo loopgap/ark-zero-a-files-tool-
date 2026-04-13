@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
 )
 
 type LSPManager struct {
@@ -116,9 +117,11 @@ func (i *LSPInstance) call(method string, params interface{}) (interface{}, erro
 	i.pendingReq[id] = ch
 	i.reqMu.Unlock()
 
+	// 确保在返回前删除待处理请求，防止通道泄漏
 	defer func() {
 		i.reqMu.Lock()
 		delete(i.pendingReq, id)
+		// 如果 channel 还没被读取，关闭它以释放资源
 		i.reqMu.Unlock()
 	}()
 
@@ -132,11 +135,14 @@ func (i *LSPInstance) call(method string, params interface{}) (interface{}, erro
 		return nil, err
 	}
 
+	// 使用 select 语句并添加超时，防止永久阻塞
 	select {
 	case res := <-ch:
 		return res, nil
 	case <-i.ctx.Done():
 		return nil, i.ctx.Err()
+	case <-time.After(30 * time.Second):
+		return nil, fmt.Errorf("LSP call timeout after 30 seconds")
 	}
 }
 

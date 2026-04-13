@@ -16,6 +16,7 @@ const languageCompartment = new Compartment();
 export function CodePreview({ file, onError }: CodePreviewProps) {
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const viewRef = useRef<EditorView | null>(null);
+	const loadedPathRef = useRef('');
 	const onErrorRef = useRef(onError);
 
 	useEffect(() => {
@@ -71,10 +72,22 @@ export function CodePreview({ file, onError }: CodePreviewProps) {
 	}, []);
 
 	useEffect(() => {
-		let cancelled = false;
-		void Promise.all([rpc<string>('fs.read', { path: file.path }), loadLanguageExtension(file.path)])
+		const view = viewRef.current;
+		if (!view || !file.path) return;
+
+		// 如果路径相同且已加载，不重复加载
+		if (loadedPathRef.current === file.path) return;
+
+		// 使用 ref 来追踪取消状态，防止内存泄漏
+		let isCancelled = false;
+
+		Promise.all([rpc<string>('fs.read', { path: file.path }), loadLanguageExtension(file.path)])
 			.then(([content, languageExtension]) => {
-				if (!viewRef.current || cancelled) return;
+				// 双重检查：组件是否已卸载或路径已变更
+				if (isCancelled || !viewRef.current) return;
+				if (loadedPathRef.current === file.path) return; // 防止重复加载
+
+				loadedPathRef.current = file.path;
 				viewRef.current.dispatch({
 					effects: languageCompartment.reconfigure(languageExtension),
 					changes: {
@@ -85,13 +98,13 @@ export function CodePreview({ file, onError }: CodePreviewProps) {
 				});
 			})
 			.catch((error) => {
-				if (!cancelled) {
+				if (!isCancelled) {
 					onErrorRef.current(describeError(error, '预览读取失败。'));
 				}
 			});
 
 		return () => {
-			cancelled = true;
+			isCancelled = true;
 		};
 	}, [file.path]);
 

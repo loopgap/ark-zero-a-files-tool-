@@ -264,10 +264,14 @@ func (b *Bridge) queueWorkspaceSync(cfg *config.AppConfig) {
 	if b.syncEngine == nil || cfg == nil {
 		return
 	}
+
+	// 创建配置快照，确保 goroutine 使用的是不可变的配置
+	snapshot := config.NormalizeAppConfig(cfg)
+
 	b.syncMu.Lock()
 	if b.syncBusy {
 		b.syncMu.Unlock()
-		return
+		return // 有正在进行的同步，忽略新的请求
 	}
 	b.syncBusy = true
 	b.syncMu.Unlock()
@@ -278,9 +282,15 @@ func (b *Bridge) queueWorkspaceSync(cfg *config.AppConfig) {
 			b.syncBusy = false
 			b.syncMu.Unlock()
 		}()
-		_ = b.syncEngine.SyncWorkspace(snapshot)
+
+		// 记录错误，不要忽略
+		if err := b.syncEngine.SyncWorkspace(snapshot); err != nil {
+			log.Printf("workspace sync error: %v", err)
+		}
+
+		// 在单独的锁保护下刷新自动分类
 		b.RefreshAutoCategories()
-	}(config.NormalizeAppConfig(cfg))
+	}(snapshot)
 }
 
 func (b *Bridge) NormalizeWorkspacePath(path string) (string, error) {

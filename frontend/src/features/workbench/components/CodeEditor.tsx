@@ -136,12 +136,20 @@ export function CodeEditor({ file, onDirtyChange, onSaved, onError }: CodeEditor
 
 	useEffect(() => {
 		const view = viewRef.current;
-		if (!view || !file.path || loadedPathRef.current === file.path) return;
+		if (!view || !file.path) return;
 
-		let cancelled = false;
-		void Promise.all([rpc<string>('fs.read', { path: file.path }), loadLanguageExtension(file.path)])
+		// 如果路径相同且已加载，不重复加载
+		if (loadedPathRef.current === file.path) return;
+
+		// 使用 ref 来追踪取消状态，防止内存泄漏
+		let isCancelled = false;
+
+		Promise.all([rpc<string>('fs.read', { path: file.path }), loadLanguageExtension(file.path)])
 			.then(([content, languageExtension]) => {
-				if (!viewRef.current || cancelled) return;
+				// 双重检查：组件是否已卸载或路径已变更
+				if (isCancelled || !viewRef.current) return;
+				if (loadedPathRef.current === file.path) return; // 防止重复加载
+
 				loadedPathRef.current = file.path;
 				initialContentRef.current = content ?? '';
 				viewRef.current.dispatch({
@@ -154,10 +162,14 @@ export function CodeEditor({ file, onDirtyChange, onSaved, onError }: CodeEditor
 				});
 				onDirtyChangeRef.current(false);
 			})
-			.catch((error) => onErrorRef.current(describeError(error, '文件读取失败。')));
+			.catch((error) => {
+				if (!isCancelled) {
+					onErrorRef.current(describeError(error, '文件读取失败。'));
+				}
+			});
 
 		return () => {
-			cancelled = true;
+			isCancelled = true;
 		};
 	}, [file.path]);
 
