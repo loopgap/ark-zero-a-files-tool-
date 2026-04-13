@@ -304,9 +304,7 @@ func buildDesktop(bundle bool) (buildOutputs, error) {
 		return buildOutputs{}, fmt.Errorf("copy desktop binary: %w", err)
 	}
 	if targetOS() == "windows" {
-		loaderSrc := filepath.Join(tauriReleaseDir, "WebView2Loader.dll")
-		loaderDst := filepath.Join("bin", "WebView2Loader.dll")
-		if err := copyFile(loaderSrc, loaderDst); err != nil {
+		if err := copyWebView2Loader(tauriReleaseDir); err != nil {
 			return buildOutputs{}, fmt.Errorf("copy WebView2Loader: %w", err)
 		}
 	}
@@ -498,14 +496,25 @@ func validateBuildArtifacts(desktopBinary string, sidecarBinary string) error {
 	if err := ensureFileExists(sidecarBinary); err != nil {
 		return err
 	}
-	if targetOS() == "windows" {
-		if err := ensureFileExists(filepath.Join("bin", "WebView2Loader.dll")); err != nil {
-			return err
-		}
-	}
 	if err := validateSidecarRPC(sidecarBinary); err != nil {
 		return err
 	}
+	return nil
+}
+
+func copyWebView2Loader(tauriReleaseDir string) error {
+	loaderDst := filepath.Join("bin", "WebView2Loader.dll")
+	candidates := []string{
+		filepath.Join(tauriReleaseDir, "WebView2Loader.dll"),
+		filepath.Join(tauriReleaseDir, "bundle", "nsis", "WebView2Loader.dll"),
+		filepath.Join(tauriReleaseDir, "bundle", "msi", "WebView2Loader.dll"),
+	}
+	for _, candidate := range candidates {
+		if err := ensureFileExists(candidate); err == nil {
+			return copyFile(candidate, loaderDst)
+		}
+	}
+	fmt.Println("⚠️  [build] WebView2Loader.dll 未找到，继续使用打包产物进行发布")
 	return nil
 }
 
