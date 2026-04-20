@@ -9,14 +9,16 @@ import { loadLanguageExtension } from './languageSupport';
 type CodePreviewProps = {
 	file: TreeNode;
 	onError: (message: string) => void;
+	prefetchedContent?: string | null;
 };
 
 const languageCompartment = new Compartment();
 
-export function CodePreview({ file, onError }: CodePreviewProps) {
+export function CodePreview({ file, onError, prefetchedContent }: CodePreviewProps) {
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const viewRef = useRef<EditorView | null>(null);
 	const loadedPathRef = useRef('');
+	const loadedContentRef = useRef<string | null>(null);
 	const onErrorRef = useRef(onError);
 
 	useEffect(() => {
@@ -75,19 +77,16 @@ export function CodePreview({ file, onError }: CodePreviewProps) {
 		const view = viewRef.current;
 		if (!view || !file.path) return;
 
-		// 如果路径相同且已加载，不重复加载
-		if (loadedPathRef.current === file.path) return;
-
-		// 使用 ref 来追踪取消状态，防止内存泄漏
 		let isCancelled = false;
+		const loadContent = prefetchedContent != null ? Promise.resolve(prefetchedContent) : rpc<string>('fs.read', { path: file.path });
 
-		Promise.all([rpc<string>('fs.read', { path: file.path }), loadLanguageExtension(file.path)])
+		Promise.all([loadContent, loadLanguageExtension(file.path)])
 			.then(([content, languageExtension]) => {
-				// 双重检查：组件是否已卸载或路径已变更
 				if (isCancelled || !viewRef.current) return;
-				if (loadedPathRef.current === file.path) return; // 防止重复加载
+				if (loadedPathRef.current === file.path && loadedContentRef.current === (content ?? '')) return;
 
 				loadedPathRef.current = file.path;
+				loadedContentRef.current = content ?? '';
 				viewRef.current.dispatch({
 					effects: languageCompartment.reconfigure(languageExtension),
 					changes: {
@@ -106,7 +105,7 @@ export function CodePreview({ file, onError }: CodePreviewProps) {
 		return () => {
 			isCancelled = true;
 		};
-	}, [file.path]);
+	}, [file.path, prefetchedContent]);
 
 	return <div className="code-preview-surface" ref={containerRef} />;
 }

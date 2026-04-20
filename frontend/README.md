@@ -1,42 +1,34 @@
-# sv
+# ArkKB Frontend
 
-Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
+这是 ArkKB 的桌面前端工作区，使用 React 19、TypeScript、Vite 和 Tauri 2。
 
-## Creating a project
+## 主要职责
 
-If you're seeing this, you've probably already done this step. Congrats!
+- 工作台 UI 与状态编排
+- 工作区树、归档紧凑态与归档展开浏览台
+- 文本编辑、Markdown 预览、文件预览
+- 通过 Tauri bridge 调用 Go sidecar RPC
 
-```sh
-# create a new project
-npx sv create my-app
-```
+## 常用命令
 
-To recreate this project with the same configuration:
-
-```sh
-# recreate this project
-npx sv@0.14.0 create --template minimal --types ts --no-install frontend
-```
-
-## Developing
-
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
-
-```sh
-npm run dev
-
-# or start the server and open the app in a new browser tab
-npm run dev -- --open
-```
-
-## Building
-
-To create a production version of your app:
-
-```sh
+```bash
+npm ci
+npm run check
 npm run build
+npm run dev
 ```
 
-You can preview the production build with `npm run preview`.
+## 目录
 
-> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.
+- `src/main.tsx`：应用入口
+- `src/lib`：共享类型、RPC helper、工作台工具函数
+- `src/features/workbench`：桌面主界面
+- `src/features/workbench/components/ArchiveExplorerView.tsx`：归档展开浏览器
+- `src/features/workbench/components/WorkbenchBrowserContent.tsx`：左侧紧凑浏览区
+- `src-tauri`：Tauri 壳、窗口与打包配置
+
+## 产物
+
+- Vite 生产构建输出到 `build/`
+- `build/` 已由 `frontend/.gitignore` 忽略，不进入版本库
+- 桌面最终打包由根目录 `scripts/dev.go` 统一驱动，不建议在这里单独维护另一套 release 脚本

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/yuin/goldmark"
@@ -14,6 +15,7 @@ import (
 )
 
 var md goldmark.Markdown
+var mermaidBlockPattern = regexp.MustCompile(`(?s)<pre><code class="language-mermaid">(.*?)</code></pre>`)
 
 func init() {
 	md = goldmark.New(
@@ -57,7 +59,6 @@ func RenderMarkdown(path string) ([]byte, error) {
 
 // RenderMarkdownBytes compiles markdown content that is already loaded in memory.
 func RenderMarkdownBytes(path string, content []byte) ([]byte, error) {
-	// Transform non-markdown files to code blocks
 	if !strings.HasSuffix(strings.ToLower(path), ".md") {
 		ext := filepath.Ext(path)
 		if ext != "" {
@@ -71,11 +72,11 @@ func RenderMarkdownBytes(path string, content []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	htmlContent := buf.String()
-
-	htmlContent = strings.ReplaceAll(htmlContent, "<pre><code class=\"language-mermaid\">", "<pre class=\"mermaid\">")
-	htmlContent = strings.ReplaceAll(htmlContent, "</code></pre>", "</pre>")
-
+	htmlContent := rewriteMermaidBlocks(buf.String())
 	finalHTML := fmt.Sprintf(htmlTemplate, htmlContent)
 	return []byte(finalHTML), nil
+}
+
+func rewriteMermaidBlocks(content string) string {
+	return mermaidBlockPattern.ReplaceAllString(content, `<pre class="mermaid">$1</pre>`)
 }

@@ -38,7 +38,7 @@ func New(readHelp func(string) ([]byte, error)) (*Server, error) {
 	}
 
 	syncEngine := sync.NewSyncEngine(storageManager)
-	bridgeSvc := bridge.NewBridge(storageManager, syncEngine)
+	bridgeSvc := bridge.NewBridge(storageManager, syncEngine, readHelp)
 	server := &Server{
 		Bridge:     bridgeSvc,
 		storage:    storageManager,
@@ -104,7 +104,6 @@ func (s *Server) startHTTP() error {
 			http.Error(w, "invalid file path", http.StatusBadRequest)
 			return
 		}
-		// 增强安全性：验证路径不包含 .. 或其他路径遍历尝试
 		if strings.Contains(filePath, "..") {
 			http.Error(w, "forbidden path traversal", http.StatusForbidden)
 			return
@@ -112,11 +111,6 @@ func (s *Server) startHTTP() error {
 		normalizedPath, err := s.Bridge.NormalizeWorkspacePath(filePath)
 		if err != nil {
 			http.Error(w, "file not accessible", http.StatusForbidden)
-			return
-		}
-		// 再次验证最终路径确实在工作区内
-		if !s.isPathInWorkspace(normalizedPath) {
-			http.Error(w, "file not in workspace", http.StatusForbidden)
 			return
 		}
 		http.ServeFile(w, r, filepath.FromSlash(normalizedPath))
@@ -127,7 +121,6 @@ func (s *Server) startHTTP() error {
 			http.Error(w, "invalid file path", http.StatusBadRequest)
 			return
 		}
-		// 增强安全性：验证路径不包含 .. 或其他路径遍历尝试
 		if strings.Contains(filePath, "..") {
 			http.Error(w, "forbidden path traversal", http.StatusForbidden)
 			return
@@ -135,11 +128,6 @@ func (s *Server) startHTTP() error {
 		normalizedPath, err := s.Bridge.NormalizeWorkspacePath(filePath)
 		if err != nil {
 			http.Error(w, "file not accessible", http.StatusForbidden)
-			return
-		}
-		// 再次验证最终路径确实在工作区内
-		if !s.isPathInWorkspace(normalizedPath) {
-			http.Error(w, "file not in workspace", http.StatusForbidden)
 			return
 		}
 		htmlBytes, err := render.RenderMarkdown(filepath.FromSlash(normalizedPath))
@@ -193,24 +181,4 @@ func (s *Server) RecoverWorkspace() {
 	for _, root := range cfg.Workspace.Roots {
 		_ = file.GlobalRescue(filepath.FromSlash(root.Path))
 	}
-}
-
-// isPathInWorkspace 验证路径是否在工作区内
-func (s *Server) isPathInWorkspace(path string) bool {
-	cfg, err := s.storage.KV.GetAppConfig()
-	if err != nil {
-		return false
-	}
-	
-	// 清理并标准化路径
-	cleanPath := filepath.Clean(path)
-	
-	for _, root := range cfg.Workspace.Roots {
-		rootPath := filepath.Clean(root.Path)
-		// 检查路径是否在根目录内
-		if strings.HasPrefix(cleanPath, rootPath) {
-			return true
-		}
-	}
-	return false
 }

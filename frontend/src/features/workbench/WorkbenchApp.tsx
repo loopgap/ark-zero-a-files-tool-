@@ -25,7 +25,7 @@ import {
 	MoreHorizontal
 } from 'lucide-react';
 import { bootstrapDesktop, buildAssetUrl, pickDirectory, rpc } from '../../lib/desktop';
-import type { AutoCategory, HelpDoc, OpenTab, SearchHit, TreeNode, WorkbenchState, WorkspaceRoot } from '../../lib/types';
+import type { ArchiveBrowseFile, ArchiveBrowseResponse, AutoCategory, HelpDoc, OpenTab, SearchHit, TreeNode, VirtualFolder, WorkbenchState, WorkspaceRoot } from '../../lib/types';
 import {
 	applyTheme,
 	classifyExtension,
@@ -40,6 +40,21 @@ import {
 	type ToastMessage
 } from '../../lib/workbench';
 import { ToastViewport } from './components/ToastViewport';
+import { TreeBrowserRow } from './components/TreeBrowserRow';
+import { WorkbenchBrowserContent } from './components/WorkbenchBrowserContent';
+import { ArchiveExplorerView } from './components/ArchiveExplorerView';
+import { VirtualList } from './components/VirtualList';
+import {
+	archiveGroupViewFromLegacy,
+	archiveSearchModeFromLegacy,
+	archiveSortByFromLegacy,
+	archiveSortDirectionFromLegacy,
+	archiveSourceKey,
+	createArchiveBrowseRequest,
+	createArchiveExplorerState,
+	type ArchiveSourceRef
+} from './archiveExplorer';
+import type { ArchiveCommittedSearch, ArchiveDirectoryEntry, ArchiveExplorerState, ArchiveMatchField, ArchiveSuggestion } from './types';
 
 const CodeEditor = lazy(async () => ({ default: (await import('./components/CodeEditor')).CodeEditor }));
 const CodePreview = lazy(async () => ({ default: (await import('./components/CodePreview')).CodePreview }));
@@ -86,66 +101,6 @@ const SOURCE_ITEMS: Array<{ id: SourceMode; label: string; icon: LucideIcon }> =
 	{ id: 'recent', label: 'Recent', icon: Clock3 },
 	{ id: 'help', label: 'Help', icon: CircleHelp }
 ];
-
-type ArchiveMatchField = 'all' | 'name' | 'directory' | 'type' | 'content';
-
-type ArchiveCommittedSearch = {
-	query: string;
-	matchField: ArchiveMatchField;
-	caseSensitive: boolean;
-	fileType: string;
-};
-
-type ArchiveDirectoryEntry =
-	| {
-			kind: 'dir';
-			name: string;
-			path: string;
-			count: number;
-	  }
-	| {
-			kind: 'file';
-			item: SearchHit;
-	  };
-
-type ArchiveSuggestion =
-	| {
-			id: string;
-			kind: 'directory';
-			label: string;
-			description: string;
-			path: string;
-	  }
-	| {
-			id: string;
-			kind: 'file';
-			label: string;
-			description: string;
-			item: SearchHit;
-	  }
-	| {
-			id: string;
-			kind: 'type';
-			label: string;
-			description: string;
-			value: string;
-	  };
-
-type TreeBrowserRowProps = {
-	node: TreeNode;
-	depth: number;
-	activeRootId: string;
-	defaultRootId: string;
-	selectedPath: string;
-	onToggle: (node: TreeNode) => void;
-	onSetActiveRoot: (rootId: string) => void;
-	onSetDefaultRoot: (rootId: string) => void;
-	onCreateFile: (path: string) => void;
-	onCreateFolder: (path: string) => void;
-	onRename: (node: TreeNode) => void;
-	onDelete: (node: TreeNode) => void;
-	onRemoveRoot: (rootId: string, label: string) => void;
-};
 
 function lastItem<T>(items: T[]) {
 	return items.length ? items[items.length - 1] : undefined;
@@ -245,6 +200,26 @@ function archiveVirtualPath(item: SearchHit, roots: WorkspaceRoot[]) {
 
 function archiveVirtualDirectory(item: SearchHit, roots: WorkspaceRoot[]) {
 	return archiveDirectory(archiveVirtualPath(item, roots));
+}
+
+function matchKindLabel(matchKind: SearchHit['matchKind']) {
+	switch (matchKind) {
+		case 'directory':
+			return '目录';
+		case 'type':
+			return '类型';
+		case 'path':
+			return '路径';
+		case 'content':
+			return '内容';
+		default:
+			return '名称';
+	}
+}
+
+function cappedListHeight(count: number, rowHeight: number, minHeight = 140, maxHeight = 520) {
+	if (!count) return minHeight;
+	return Math.max(minHeight, Math.min(count * rowHeight, maxHeight));
 }
 
 function localArchiveMatchKind(
@@ -399,130 +374,6 @@ function findNodeByPath(nodes: TreeNode[], path: string): TreeNode | null {
 	return null;
 }
 
-function TreeBrowserRow(props: TreeBrowserRowProps) {
-	const {
-		node,
-		depth,
-		activeRootId,
-		defaultRootId,
-		selectedPath,
-		onToggle,
-		onSetActiveRoot,
-		onSetDefaultRoot,
-		onCreateFile,
-		onCreateFolder,
-		onRename,
-		onDelete,
-		onRemoveRoot
-	} = props;
-
-	const isRoot = node.kind === 'workspace-root';
-	const isDir = node.kind === 'dir' || node.kind === 'workspace-root';
-	const isFile = node.kind === 'file';
-	const isSelected = normalizePathKey(node.path) === normalizePathKey(selectedPath);
-
-	return (
-		<>
-			<div className={`browser-tree-row${isSelected ? ' selected' : ''}`} style={{ paddingLeft: `${14 + depth * 14}px` }}>
-				<button className="browser-tree-main" onClick={() => onToggle(node)} title={node.path} type="button">
-					<span className="browser-tree-leading">
-						{isDir ? (
-							<>
-								{node.children?.length ? (
-									node.expanded ? (
-										<ChevronDown size={14} />
-									) : (
-										<ChevronRight size={14} />
-									)
-								) : (
-									<span className="browser-tree-spacer" />
-								)}
-								{node.expanded ? <FolderOpen size={15} /> : <Folder size={15} />}
-							</>
-						) : (
-							<>
-								<span className="browser-tree-spacer" />
-								<FileText size={15} />
-							</>
-						)}
-					</span>
-					<span className="browser-tree-copy">
-						<span className="browser-tree-label">{node.name}</span>
-					</span>
-					<span className="browser-tree-badges">
-						{isRoot && node.rootId === activeRootId ? <span className="pill">活动</span> : null}
-						{isRoot && node.rootId === defaultRootId ? <span className="pill subtle">默认</span> : null}
-					</span>
-				</button>
-				<div className="browser-tree-actions">
-					{isRoot ? (
-						<>
-							<button aria-label="设为活动根目录" className="tree-action-icon" onClick={() => onSetActiveRoot(node.rootId)} title="设为活动根目录" type="button">
-								<CheckCircle2 size={14} />
-							</button>
-							<button aria-label="设为默认根目录" className="tree-action-icon" onClick={() => onSetDefaultRoot(node.rootId)} title="设为默认根目录" type="button">
-								<Star size={14} />
-							</button>
-							<button aria-label="新建文件" className="tree-action-icon" onClick={() => onCreateFile(node.path)} title="新建文件" type="button">
-								<FilePlus2 size={14} />
-							</button>
-							<button aria-label="新建目录" className="tree-action-icon" onClick={() => onCreateFolder(node.path)} title="新建目录" type="button">
-								<FolderPlus size={14} />
-							</button>
-							<button aria-label="移除根目录" className="tree-action-icon" onClick={() => onRemoveRoot(node.rootId, node.name)} title="移除根目录" type="button">
-								<Trash2 size={14} />
-							</button>
-						</>
-					) : isDir ? (
-						<>
-							<button aria-label="新建文件" className="tree-action-icon" onClick={() => onCreateFile(node.path)} title="新建文件" type="button">
-								<FilePlus2 size={14} />
-							</button>
-							<button aria-label="新建目录" className="tree-action-icon" onClick={() => onCreateFolder(node.path)} title="新建目录" type="button">
-								<FolderPlus size={14} />
-							</button>
-							<button aria-label="重命名" className="tree-action-icon" onClick={() => onRename(node)} title="重命名" type="button">
-								<PencilLine size={14} />
-							</button>
-							<button aria-label="删除" className="tree-action-icon" onClick={() => onDelete(node)} title="删除" type="button">
-								<Trash2 size={14} />
-							</button>
-						</>
-					) : isFile ? (
-						<>
-							<button aria-label="重命名" className="tree-action-icon" onClick={() => onRename(node)} title="重命名" type="button">
-								<PencilLine size={14} />
-							</button>
-							<button aria-label="删除" className="tree-action-icon" onClick={() => onDelete(node)} title="删除" type="button">
-								<Trash2 size={14} />
-							</button>
-						</>
-					) : null}
-				</div>
-			</div>
-			{node.expanded &&
-				node.children?.map((child) => (
-					<TreeBrowserRow
-						activeRootId={activeRootId}
-						defaultRootId={defaultRootId}
-						depth={depth + 1}
-						key={child.path}
-						node={child}
-						selectedPath={selectedPath}
-						onCreateFile={onCreateFile}
-						onCreateFolder={onCreateFolder}
-						onDelete={onDelete}
-						onRemoveRoot={onRemoveRoot}
-						onRename={onRename}
-						onSetActiveRoot={onSetActiveRoot}
-						onSetDefaultRoot={onSetDefaultRoot}
-						onToggle={onToggle}
-					/>
-				))}
-		</>
-	);
-}
-
 export function WorkbenchApp() {
 	const [workbench, setWorkbench] = useState<WorkbenchState | null>(null);
 	const [settingsConfig, setSettingsConfig] = useState<any | null>(null);
@@ -582,6 +433,11 @@ export function WorkbenchApp() {
 	const [tabMenu, setTabMenu] = useState<TabMenuState>({ open: false });
 	const [revealedWorkspacePath, setRevealedWorkspacePath] = useState('');
 	const [archiveSuggestionCursor, setArchiveSuggestionCursor] = useState(-1);
+	const [archiveExplorerStates, setArchiveExplorerStates] = useState<Record<string, ArchiveExplorerState>>({});
+	const [archiveBrowseResponse, setArchiveBrowseResponse] = useState<ArchiveBrowseResponse | null>(null);
+	const [archiveBrowseLoading, setArchiveBrowseLoading] = useState(false);
+	const [archiveBrowseError, setArchiveBrowseError] = useState('');
+	const [archivePreviewCacheTick, setArchivePreviewCacheTick] = useState(0);
 	const [directoryAllowlist, setDirectoryAllowlist] = useState('');
 	const [directoryBlocklist, setDirectoryBlocklist] = useState('');
 	const [fileTypeAllowlist, setFileTypeAllowlist] = useState('');
@@ -590,9 +446,15 @@ export function WorkbenchApp() {
 	const lastFocusSyncAtRef = useRef(0);
 	const focusSyncTimerRef = useRef<number | null>(null);
 	const archiveSearchInputRef = useRef<HTMLInputElement | null>(null);
+	const archiveLoadRequestRef = useRef(0);
+	const archiveBrowseRequestRef = useRef(0);
+	const archivePreviewContentRef = useRef<Map<string, string>>(new Map());
+	const searchRequestRef = useRef(0);
+	const helpRequestRef = useRef(0);
+	const workbenchLoadRequestRef = useRef(0);
 
 	const activeTab = useMemo(() => tabs.find((tab) => tab.id === activeTabId) ?? null, [activeTabId, tabs]);
-	const selectedWorkspacePath = activeTab?.path || revealedWorkspacePath;
+	const selectedWorkspacePath = revealedWorkspacePath || activeTab?.path || '';
 	const workspaceRoots = workbench?.workspace.roots ?? [];
 	const activeRoot = useMemo(
 		() => workbench?.workspace.roots.find((root) => root.id === workbench.workspace.activeRootId) ?? null,
@@ -606,6 +468,25 @@ export function WorkbenchApp() {
 		() => workbench?.autoCategories.find((item) => item.id === selectedAutoCategoryId) ?? null,
 		[selectedAutoCategoryId, workbench]
 	);
+	const currentArchiveSource = useMemo<ArchiveSourceRef | null>(() => {
+		if (selectedArchiveId) return { kind: 'virtual_folder', id: selectedArchiveId };
+		if (selectedAutoCategoryId) return { kind: 'auto_category', id: selectedAutoCategoryId };
+		return null;
+	}, [selectedArchiveId, selectedAutoCategoryId]);
+	const currentArchiveSourceKey = useMemo(() => archiveSourceKey(currentArchiveSource), [currentArchiveSource]);
+	const currentArchiveExplorerState = useMemo(
+		() => (currentArchiveSource ? archiveExplorerStates[currentArchiveSourceKey] ?? createArchiveExplorerState(currentArchiveSource.kind) : null),
+		[archiveExplorerStates, currentArchiveSource, currentArchiveSourceKey]
+	);
+	const selectedArchiveBrowseFile = useMemo(() => {
+		if (!archiveBrowseResponse || !currentArchiveExplorerState) return null;
+		const targetPath = currentArchiveExplorerState.selectedPath;
+		return archiveBrowseResponse.files.find((item) => item.path === targetPath) ?? archiveBrowseResponse.files[0] ?? null;
+	}, [archiveBrowseResponse, currentArchiveExplorerState]);
+	const selectedArchivePrefetchedContent = useMemo(() => {
+		if (!selectedArchiveBrowseFile) return null;
+		return archivePreviewContentRef.current.get(selectedArchiveBrowseFile.path) ?? null;
+	}, [archivePreviewCacheTick, selectedArchiveBrowseFile]);
 	const normalizedArchiveFileType = useMemo(() => normalizeArchiveFileType(archiveFileTypeFilter), [archiveFileTypeFilter]);
 	const archiveQueryNormalized = archiveQuery.trim();
 	const isCommittedArchiveSearch =
@@ -842,16 +723,135 @@ export function WorkbenchApp() {
 		};
 	}
 
+	function updateArchiveExplorerState(source: ArchiveSourceRef, updater: Partial<ArchiveExplorerState> | ((current: ArchiveExplorerState) => ArchiveExplorerState)) {
+		setArchiveExplorerStates((current) => {
+			const key = archiveSourceKey(source);
+			const base = current[key] ?? createArchiveExplorerState(source.kind);
+			const next = typeof updater === 'function' ? updater(base) : { ...base, ...updater };
+			return { ...current, [key]: next };
+		});
+	}
+
+	function openArchiveExplorer() {
+		if (!currentArchiveSource) return;
+		updateArchiveExplorerState(currentArchiveSource, (current) => ({
+			...current,
+			folderPath: archiveFolderPath || current.folderPath,
+			query: archiveQuery.trim() || current.query,
+			searchMode: archiveSearchModeFromLegacy(archiveMatchFilter),
+			sortBy: archiveSortByFromLegacy(),
+			sortDirection: archiveSortDirectionFromLegacy(),
+			groupView: archiveGroupViewFromLegacy(),
+			cursor: 0,
+			expanded: true
+		}));
+		setSourceMode('archives');
+	}
+
+	function collapseArchiveExplorer() {
+		if (!currentArchiveSource) return;
+		updateArchiveExplorerState(currentArchiveSource, { expanded: false });
+	}
+
+	function setCurrentArchiveExplorerState(updater: Partial<ArchiveExplorerState> | ((current: ArchiveExplorerState) => ArchiveExplorerState)) {
+		if (!currentArchiveSource) return;
+		updateArchiveExplorerState(currentArchiveSource, updater);
+	}
+
+	async function fetchArchiveBrowse(source: ArchiveSourceRef, state: ArchiveExplorerState) {
+		const requestId = ++archiveBrowseRequestRef.current;
+		setArchiveBrowseLoading(true);
+		setArchiveBrowseError('');
+		try {
+			const request = createArchiveBrowseRequest(source, state) as unknown as Record<string, unknown>;
+			const response = await rpc<ArchiveBrowseResponse>('archive.browse', request);
+			if (requestId !== archiveBrowseRequestRef.current) return;
+			setArchiveBrowseResponse(response);
+			setArchiveBrowseError('');
+			setArchiveExplorerStates((current) => {
+				const key = archiveSourceKey(source);
+				const existing = current[key] ?? state;
+				const hasCurrentSelection = response.files.some((item) => item.path === existing.selectedPath);
+				return {
+					...current,
+					[key]: {
+						...existing,
+						selectedPath: hasCurrentSelection ? existing.selectedPath : response.files[0]?.path || ''
+					}
+				};
+			});
+			setStatusText('归档浏览已更新');
+		} catch (error) {
+			if (requestId !== archiveBrowseRequestRef.current) return;
+			const message = describeError(error, '归档浏览当前不可用。');
+			setArchiveBrowseError(message);
+			setStatusText('归档浏览加载失败');
+		} finally {
+			if (requestId === archiveBrowseRequestRef.current) {
+				setArchiveBrowseLoading(false);
+			}
+		}
+	}
+
+	function setArchiveExplorerQuery(value: string) {
+		setCurrentArchiveExplorerState((current) => ({ ...current, query: value, cursor: 0 }));
+	}
+
+	function setArchiveExplorerSearchMode(mode: 'quick' | 'content') {
+		setCurrentArchiveExplorerState((current) => ({ ...current, searchMode: mode, cursor: 0 }));
+	}
+
+	function setArchiveExplorerSortBy(sortBy: ArchiveExplorerState['sortBy']) {
+		setCurrentArchiveExplorerState((current) => ({ ...current, sortBy, cursor: 0 }));
+	}
+
+	function setArchiveExplorerSortDirection(sortDirection: ArchiveExplorerState['sortDirection']) {
+		setCurrentArchiveExplorerState((current) => ({ ...current, sortDirection, cursor: 0 }));
+	}
+
+	function setArchiveExplorerGroupView(groupView: ArchiveExplorerState['groupView']) {
+		setCurrentArchiveExplorerState({ groupView });
+	}
+
+	function setArchiveExplorerFolderPath(folderPath: string) {
+		setCurrentArchiveExplorerState((current) => ({ ...current, folderPath, cursor: 0 }));
+	}
+
+	function setArchiveExplorerSelectedPath(selectedPath: string) {
+		setCurrentArchiveExplorerState({ selectedPath });
+	}
+
+	function setArchiveExplorerNavTab(leftTab: ArchiveExplorerState['leftTab']) {
+		setCurrentArchiveExplorerState({ leftTab });
+	}
+
+	function goToNextArchiveBrowsePage() {
+		if (!currentArchiveExplorerState || archiveBrowseResponse?.nextCursor == null || archiveBrowseResponse.nextCursor < 0) return;
+		setCurrentArchiveExplorerState((current) => ({ ...current, cursor: archiveBrowseResponse.nextCursor, selectedPath: '' }));
+	}
+
+	function goToPreviousArchiveBrowsePage() {
+		if (!currentArchiveExplorerState) return;
+		setCurrentArchiveExplorerState((current) => ({ ...current, cursor: Math.max(0, current.cursor - 120), selectedPath: '' }));
+	}
 	function shouldRunArchiveIndexSearch(request: ArchiveCommittedSearch) {
 		return Boolean(request.query || request.fileType);
 	}
 
 	async function loadArchive(folderId: string, request: ArchiveCommittedSearch = currentArchiveSearch('')) {
+		const requestId = ++archiveLoadRequestRef.current;
+		searchRequestRef.current += 1;
+		helpRequestRef.current += 1;
 		setSelectedArchiveId(folderId);
 		setSelectedAutoCategoryId('');
 		setArchiveFolderPath('');
 		setSearchArchiveId(folderId);
 		setSourceMode('archives');
+		updateArchiveExplorerState({ kind: 'virtual_folder', id: folderId }, (current) => ({
+			...current,
+			leftTab: 'folders',
+			expanded: currentArchiveExplorerState?.expanded ?? current.expanded
+		}));
 		setArchiveQuery(request.query);
 		const response = await runTask(async () => {
 			if (shouldRunArchiveIndexSearch(request)) {
@@ -872,7 +872,7 @@ export function WorkbenchApp() {
 			const baseItems = await rpc<SearchHit[]>('archive.list', { folderId });
 			return { baseItems, items: baseItems };
 		});
-		if (!response) return;
+		if (!response || requestId !== archiveLoadRequestRef.current) return;
 		setArchiveBaseItems(response.baseItems);
 		if (!shouldRunArchiveIndexSearch(request)) {
 			setArchiveCommittedSearch({ query: '', matchField: 'all', caseSensitive: false, fileType: '' });
@@ -889,11 +889,19 @@ export function WorkbenchApp() {
 	}
 
 	async function loadAutoCategory(category: AutoCategory, request: ArchiveCommittedSearch = currentArchiveSearch('')) {
+		const requestId = ++archiveLoadRequestRef.current;
+		searchRequestRef.current += 1;
+		helpRequestRef.current += 1;
 		setSelectedAutoCategoryId(category.id);
 		setSelectedArchiveId('');
 		setArchiveFolderPath('');
 		setSearchArchiveId('');
 		setSourceMode('archives');
+		updateArchiveExplorerState({ kind: 'auto_category', id: category.id }, (current) => ({
+			...current,
+			leftTab: 'categories',
+			expanded: currentArchiveExplorerState?.expanded ?? current.expanded
+		}));
 		setArchiveQuery(request.query);
 		setStatusText(shouldRunArchiveIndexSearch(request) ? `正在搜索 ${category.label}...` : `正在载入 ${category.label}...`);
 		const response = await runTask(async () => {
@@ -921,7 +929,7 @@ export function WorkbenchApp() {
 			const baseItems = await rpc<SearchHit[]>('search.query', baseRequest);
 			return { baseItems, items: baseItems };
 		});
-		if (!response) return;
+		if (!response || requestId !== archiveLoadRequestRef.current) return;
 		setArchiveBaseItems(response.baseItems);
 		if (!shouldRunArchiveIndexSearch(request)) {
 			setArchiveCommittedSearch({ query: '', matchField: 'all', caseSensitive: false, fileType: '' });
@@ -935,6 +943,25 @@ export function WorkbenchApp() {
 		);
 	}
 
+	async function openArchiveFolderExplorer(folder: VirtualFolder) {
+		updateArchiveExplorerState({ kind: 'virtual_folder', id: folder.id }, (current) => ({
+			...current,
+			leftTab: 'folders',
+			cursor: 0,
+			expanded: true
+		}));
+		await loadArchive(folder.id, { query: '', matchField: 'all', caseSensitive: false, fileType: '' });
+	}
+
+	async function openArchiveCategoryExplorer(category: AutoCategory) {
+		updateArchiveExplorerState({ kind: 'auto_category', id: category.id }, (current) => ({
+			...current,
+			leftTab: 'categories',
+			cursor: 0,
+			expanded: true
+		}));
+		await loadAutoCategory(category, { query: '', matchField: 'all', caseSensitive: false, fileType: '' });
+	}
 	async function runArchiveSearch(keyword = archiveQuery) {
 		const request = currentArchiveSearch(keyword);
 		setArchiveQuery(request.query);
@@ -978,6 +1005,9 @@ export function WorkbenchApp() {
 	}
 
 	async function runSearch(keyword = searchQuery) {
+		archiveLoadRequestRef.current += 1;
+		helpRequestRef.current += 1;
+		const requestId = ++searchRequestRef.current;
 		const normalized = keyword.trim();
 		setSearchQuery(keyword);
 		setSourceMode('search');
@@ -998,14 +1028,18 @@ export function WorkbenchApp() {
 				fileType: normalizedSearchType
 			})
 		);
-		if (!results) return;
+		if (!results || requestId !== searchRequestRef.current) return;
 		setSearchResults(results);
 		setStatusText(`找到 ${results.length} 个结果`);
 	}
 
 	async function loadWorkbench(resetTabs = false, reloadContext = true): Promise<WorkbenchState | null> {
+		archiveLoadRequestRef.current += 1;
+		searchRequestRef.current += 1;
+		helpRequestRef.current += 1;
+		const requestId = ++workbenchLoadRequestRef.current;
 		const nextWorkbench = await runTask(() => rpc<WorkbenchState>('workspace.get'));
-		if (!nextWorkbench) return null;
+		if (!nextWorkbench || requestId !== workbenchLoadRequestRef.current) return null;
 		const normalized = normalizeWorkbenchState(nextWorkbench);
 		setWorkbench(normalized);
 		applyTheme(normalized.theme);
@@ -1063,18 +1097,19 @@ export function WorkbenchApp() {
 
 	async function refreshVisibleState(resetTabs = false) {
 		const next = await refreshSnapshot(resetTabs);
-		await refreshCurrentContext();
+		await refreshCurrentContext(next);
 		return next;
 	}
 
-	async function refreshCurrentContext() {
+	async function refreshCurrentContext(snapshotOverride?: WorkbenchState | null) {
+		const snapshot = snapshotOverride ?? workbench;
 		if (sourceMode === 'archives') {
 			if (selectedArchiveId) {
 				await loadArchive(selectedArchiveId, archiveCommittedSearch);
 				return;
 			}
 			if (selectedAutoCategoryId) {
-				const category = workbench?.autoCategories.find((item) => item.id === selectedAutoCategoryId);
+				const category = snapshot?.autoCategories.find((item) => item.id === selectedAutoCategoryId);
 				if (category) {
 					await loadAutoCategory(category, archiveCommittedSearch);
 				}
@@ -1086,11 +1121,14 @@ export function WorkbenchApp() {
 		}
 	}
 
+	
 	async function loadHelpDoc(docId: string, force = false) {
+		const requestId = ++helpRequestRef.current;
 		if (!docId) {
 			setLoadedHelpDocId('');
 			setHelpContent('');
 			setHelpError('');
+			setHelpLoading(false);
 			return;
 		}
 		if (!force && loadedHelpDocId === docId && helpContent) return;
@@ -1099,17 +1137,21 @@ export function WorkbenchApp() {
 		setHelpError('');
 		try {
 			const content = await rpc<string>('help.read', { docId });
+			if (requestId !== helpRequestRef.current) return;
 			setHelpContent(content || '');
 			setLoadedHelpDocId(docId);
 			setStatusText('帮助内容已加载');
 		} catch (error) {
+			if (requestId !== helpRequestRef.current) return;
 			const message = describeError(error, '帮助文档当前不可读。');
 			setHelpContent('');
 			setLoadedHelpDocId('');
 			setHelpError(message);
 			pushToast(message, 'error');
 		} finally {
-			setHelpLoading(false);
+			if (requestId === helpRequestRef.current) {
+				setHelpLoading(false);
+			}
 		}
 	}
 
@@ -1321,7 +1363,13 @@ export function WorkbenchApp() {
 		const ok = await runTask(() => rpc<boolean>('workspace.setActive', { rootId }));
 		if (ok === null) return;
 		setSearchRootId(rootId);
-		await refreshVisibleState();
+		const next = await refreshSnapshot();
+		const nextRoot = next?.workspace.roots.find((root) => root.id === rootId) ?? null;
+		setSourceMode('workspace');
+		if (nextRoot) {
+			setRevealedWorkspacePath(nextRoot.path);
+			await ensureWorkspacePathVisible(nextRoot.path, rootId, next);
+		}
 		pushToast('活动根目录已更新', 'success');
 		setStatusText('活动根目录已更新');
 	}
@@ -1811,6 +1859,53 @@ export function WorkbenchApp() {
 	}, [archiveSuggestions.length, archiveCaseSensitive, archiveFileTypeFilter, archiveMatchFilter, archiveQuery, archiveFolderPath]);
 
 	useEffect(() => {
+		if (!currentArchiveSource) {
+			setArchiveBrowseResponse(null);
+			setArchiveBrowseError('');
+			setArchiveBrowseLoading(false);
+			return;
+		}
+		if (!currentArchiveExplorerState?.expanded) return;
+		const delay = currentArchiveExplorerState.searchMode === 'content' ? 420 : 180;
+		const timer = window.setTimeout(() => {
+			void fetchArchiveBrowse(currentArchiveSource, currentArchiveExplorerState);
+		}, delay);
+		return () => window.clearTimeout(timer);
+	}, [
+		currentArchiveExplorerState?.cursor,
+		currentArchiveExplorerState?.expanded,
+		currentArchiveExplorerState?.folderPath,
+		currentArchiveExplorerState?.query,
+		currentArchiveExplorerState?.searchMode,
+		currentArchiveExplorerState?.sortBy,
+		currentArchiveExplorerState?.sortDirection,
+		currentArchiveSource,
+		currentArchiveSourceKey
+	]);
+
+	useEffect(() => {
+		if (!currentArchiveExplorerState?.expanded || !selectedArchiveBrowseFile || !archiveBrowseResponse) return;
+		let cancelled = false;
+		const selectedIndex = archiveBrowseResponse.files.findIndex((item) => item.path === selectedArchiveBrowseFile.path);
+		const targets = [selectedArchiveBrowseFile, archiveBrowseResponse.files[selectedIndex - 1], archiveBrowseResponse.files[selectedIndex + 1]].filter(Boolean) as ArchiveBrowseFile[];
+		for (const file of targets) {
+			const ext = (file.extension || '').toLowerCase();
+			const kind = classifyExtension(ext);
+			if (kind !== 'text' || ['.htm', '.html', '.svg', '.md'].includes(ext)) continue;
+			if (archivePreviewContentRef.current.has(file.path)) continue;
+			void rpc<string>('fs.read', { path: file.path })
+				.then((content) => {
+					if (cancelled) return;
+					archivePreviewContentRef.current.set(file.path, content ?? '');
+					setArchivePreviewCacheTick((value) => value + 1);
+				})
+				.catch(() => undefined);
+		}
+		return () => {
+			cancelled = true;
+		};
+	}, [archiveBrowseResponse, currentArchiveExplorerState?.expanded, selectedArchiveBrowseFile]);
+	useEffect(() => {
 		if (!tabMenu.open) return;
 		function closeMenu() {
 			setTabMenu({ open: false });
@@ -1910,530 +2005,82 @@ export function WorkbenchApp() {
 		};
 	}, []);
 
-	const browserContent = (() => {
-		if (!workbench) {
-			return <div className="browser-empty">正在连接工作台...</div>;
-		}
-
-		if (sourceMode === 'workspace') {
-			if (!workbench.physicalRoots.length) {
-				return <div className="browser-empty">当前还没有根目录。</div>;
+	const browserContent = (
+		<WorkbenchBrowserContent
+			archiveBreadcrumbs={archiveBreadcrumbs}
+			archiveCaseSensitive={archiveCaseSensitive}
+			archiveDirectoryCount={archiveDirectoryCount}
+			archiveDirectoryEntries={archiveDirectoryEntries}
+			archiveFileCount={archiveFileCount}
+			archiveFileTypeFilter={archiveFileTypeFilter}
+			archiveFolderPath={archiveFolderPath}
+			archiveMatchFilter={archiveMatchFilter}
+			archiveQuery={archiveQuery}
+			archiveQueryNormalized={archiveQueryNormalized}
+			archiveResultCursor={archiveResultCursor}
+			archiveSearchInputRef={archiveSearchInputRef}
+			archiveSuggestionCursor={archiveSuggestionCursor}
+			archiveSuggestions={archiveSuggestions}
+			hasActiveTab={Boolean(activeTab)}
+			formatArchiveDirectory={(item) => archiveVirtualDirectory(item, workspaceRoots)}
+			formatArchivePath={(item) => archiveVirtualPath(item, workspaceRoots)}
+			formatMatchKind={matchKindLabel}
+			getListHeight={cappedListHeight}
+			isCommittedArchiveSearch={isCommittedArchiveSearch}
+			normalizedArchiveFileType={normalizedArchiveFileType}
+			onAddRoot={addRoot}
+			onApplyArchiveSuggestion={applyArchiveSuggestion}
+			onAttachActiveToArchive={attachActiveToArchive}
+			onAttachSearchResultToSelectedArchive={attachSearchResultToSelectedArchive}
+			onDetachFromArchive={detachFromArchive}
+			onLoadArchive={loadArchive}
+			onLoadAutoCategory={loadAutoCategory}
+			onOpenDocument={openDocument}
+			onOpenRecentItem={(item) =>
+				openDocument({
+					...item,
+					virtualFolderIds: [],
+					matchKind: 'name',
+					extension: extensionFromPath(item.path)
+				})
 			}
-			return (
-				<div className="browser-stack">
-					<section className="browser-section">
-						<header className="browser-section-header">
-							<h3>工作区管理</h3>
-							<div className="pane-header-actions">
-								<button onClick={() => void openWorkspace()} type="button">
-									<FolderOpen size={14} />
-								</button>
-								<button onClick={() => void addRoot()} type="button">
-									<FolderPlus size={14} />
-								</button>
-							</div>
-						</header>
-						<div className="workspace-root-cards">
-							{workbench.workspace.roots.map((root) => (
-								<div className={`workspace-root-card ${root.id === workbench.workspace.activeRootId ? 'active' : ''}`} key={root.id}>
-									<div className="workspace-root-card-copy">
-										<strong>{root.label}</strong>
-										<span>{root.path}</span>
-									</div>
-									<div className="workspace-root-card-actions">
-										<button onClick={() => setActiveRoot(root.id)} type="button">
-											活动
-										</button>
-										<button onClick={() => setDefaultRoot(root.id)} type="button">
-											默认
-										</button>
-										<button onClick={() => requestRemoveRoot(root.id, root.label)} type="button">
-											移除
-										</button>
-									</div>
-								</div>
-							))}
-						</div>
-					</section>
-					<section className="browser-section">
-						<header className="browser-section-header">
-							<h3>目录浏览</h3>
-						</header>
-						<div className="browser-tree">
-							{workbench.physicalRoots.map((node) => (
-								<TreeBrowserRow
-									activeRootId={workbench.workspace.activeRootId}
-									defaultRootId={workbench.workspace.defaultRootId}
-									depth={0}
-									key={node.path}
-									node={node}
-									selectedPath={selectedWorkspacePath}
-									onCreateFile={(path) => requestCreatePhysical('file', path)}
-									onCreateFolder={(path) => requestCreatePhysical('folder', path)}
-									onDelete={requestDeleteNode}
-									onRemoveRoot={requestRemoveRoot}
-									onRename={requestRenameNode}
-									onSetActiveRoot={setActiveRoot}
-									onSetDefaultRoot={setDefaultRoot}
-									onToggle={toggleTreeNode}
-								/>
-							))}
-						</div>
-					</section>
-				</div>
-			);
-		}
-
-		if (sourceMode === 'archives') {
-			const archiveTargetLabel = selectedAutoCategory?.label || selectedArchive?.name || '未选择归档';
-			const archivePlaceholder = selectedArchiveId
-				? '搜索当前归档的名称、目录、类型或内容'
-				: selectedAutoCategoryId
-					? '搜索当前分类的名称、目录、类型或内容'
-					: '先选择一个归档或分类，再开始搜索';
-			const needsDeepSearch = archiveMatchFilter === 'content' || archiveQueryNormalized.length > 0;
-			return (
-				<div className="browser-stack archive-browser-layout">
-					<div className="archive-search-toolbar archive-search-toolbar-top">
-						<div className="archive-search-meta">
-							<div>
-								<strong>归档搜索</strong>
-								<span>{archiveTargetLabel}</span>
-							</div>
-							<span className="pill subtle">
-								{selectedArchiveId || selectedAutoCategoryId ? '当前归档范围' : '未选中归档'}
-							</span>
-						</div>
-						<div className="archive-search-input">
-							<Search size={14} />
-							<input
-								onChange={(event) => setArchiveQuery(event.target.value)}
-								onKeyDown={(event) => {
-									if (event.key === 'ArrowDown' && archiveSuggestions.length) {
-										event.preventDefault();
-										setArchiveSuggestionCursor(0);
-										return;
-									}
-									if (event.key === 'Enter') {
-										event.preventDefault();
-										void runArchiveSearch();
-										return;
-									}
-									if (event.key === 'ArrowDown' && archiveDirectoryEntries.length) {
-										event.preventDefault();
-										setArchiveResultCursor(0);
-									}
-								}}
-								placeholder={archivePlaceholder}
-								ref={archiveSearchInputRef}
-								value={archiveQuery}
-							/>
-							<button
-								className="primary"
-								disabled={!selectedArchiveId && !selectedAutoCategoryId}
-								onClick={() => void runArchiveSearch()}
-								type="button"
-							>
-								深搜
-							</button>
-						</div>
-						{archiveSuggestions.length ? (
-							<div className="archive-suggestions">
-								{archiveSuggestions.map((suggestion, index) => (
-									<button
-										className={`archive-suggestion ${archiveSuggestionCursor === index ? 'active' : ''}`}
-										key={suggestion.id}
-										onClick={() => void applyArchiveSuggestion(suggestion)}
-										type="button"
-									>
-										<strong>{suggestion.label}</strong>
-										<span>{suggestion.description}</span>
-										<em>
-											{suggestion.kind === 'directory'
-												? '进入目录'
-												: suggestion.kind === 'type'
-													? '按类型过滤'
-													: '打开文件'}
-										</em>
-									</button>
-								))}
-							</div>
-						) : null}
-						<div className="archive-search-options">
-							<div className="archive-match-filters">
-								{[
-									['all', '全部'],
-									['name', '名称'],
-									['directory', '目录'],
-									['type', '类型'],
-									['content', '内容']
-								].map(([id, label]) => (
-									<button
-										className={archiveMatchFilter === id ? 'active' : ''}
-										key={id}
-										onClick={() => setArchiveMatchFilter(id as ArchiveMatchField)}
-										type="button"
-									>
-										{label}
-									</button>
-								))}
-							</div>
-							<div className="archive-option-row">
-								<label className="archive-option-input">
-									<span>文件类型</span>
-									<select value={archiveFileTypeFilter} onChange={(event) => setArchiveFileTypeFilter(event.target.value)}>
-										<option value="">全部类型</option>
-										{workbench.autoCategories.map((category) => (
-											<option key={category.id} value={category.extension}>
-												{category.label}
-											</option>
-										))}
-									</select>
-								</label>
-								<label className="archive-check-option">
-									<input
-										checked={archiveCaseSensitive}
-										onChange={(event) => setArchiveCaseSensitive(event.target.checked)}
-										type="checkbox"
-									/>
-									<span>区分大小写</span>
-								</label>
-								{archiveQuery || archiveFileTypeFilter ? (
-									<button
-										onClick={() => {
-											setArchiveQuery('');
-											setArchiveFileTypeFilter('');
-											void runArchiveSearch('');
-										}}
-										type="button"
-									>
-										清空
-									</button>
-								) : null}
-							</div>
-						</div>
-						<div className="archive-search-hint">
-							<span>搜索栏固定在归档顶部。</span>
-							<span>名称 / 目录 / 类型会即时筛选，内容匹配按 <kbd>Enter</kbd> 或点“深搜”。</span>
-							{archiveCaseSensitive ? <span>当前按大小写严格匹配。</span> : null}
-							{archiveFileTypeFilter ? <span>当前仅显示 {archiveFileTypeFilter}。</span> : null}
-							{needsDeepSearch && !isCommittedArchiveSearch ? <span>当前结果仍在本地预筛选，深搜后会补内容匹配。</span> : null}
-						</div>
-					</div>
-					<section className="browser-section archive-browser-section">
-						<header className="browser-section-header">
-							<div>
-								<h3>{selectedAutoCategory?.label || selectedArchive?.name || '归档内容'}</h3>
-								<p className="browser-section-subtitle">
-									{selectedArchiveId || selectedAutoCategoryId
-										? `当前目录 ${archiveDirectoryCount} 个目录，${archiveFileCount} 个文件`
-										: '先选择一个自动分类或手动归档，再开始浏览'}
-								</p>
-							</div>
-							<div className="pane-header-actions">
-								{archiveFolderPath ? (
-									<button onClick={() => setArchiveFolderPath('')} type="button">
-										返回根目录
-									</button>
-								) : null}
-								{selectedArchiveId && activeTab ? (
-									<button onClick={() => void attachActiveToArchive()} type="button">
-										附加当前文件
-									</button>
-								) : null}
-							</div>
-						</header>
-						{selectedAutoCategoryId || selectedArchiveId ? (
-							archiveDirectoryEntries.length ? (
-								<>
-									<div className="archive-breadcrumbs">
-										<button className={!archiveFolderPath ? 'active' : ''} onClick={() => setArchiveFolderPath('')} type="button">
-											根目录
-										</button>
-										{archiveBreadcrumbs.map((crumb) => (
-											<button
-												className={crumb.path === archiveFolderPath ? 'active' : ''}
-												key={crumb.path}
-												onClick={() => setArchiveFolderPath(crumb.path)}
-												type="button"
-											>
-												{crumb.label}
-											</button>
-										))}
-									</div>
-									{archiveDirectoryEntries.map((entry, index) =>
-										entry.kind === 'dir' ? (
-											<div className="browser-row-card" key={`dir:${entry.path}`}>
-												<button className="browser-list-button" onClick={() => setArchiveFolderPath(entry.path)} title={entry.path} type="button">
-													<Folder size={15} />
-													<div className="browser-row-copy">
-														<strong>{entry.name}</strong>
-														<span>{entry.path}</span>
-														<div className="archive-result-meta">
-															<span className="match-kind match-kind-directory">目录</span>
-															<span className="archive-result-path">{entry.count} 个项目</span>
-														</div>
-													</div>
-												</button>
-											</div>
-										) : (
-											<div
-												className={`browser-row-card ${archiveResultCursor === index ? 'active' : ''}`}
-												key={`${selectedAutoCategoryId || selectedArchiveId}:${entry.item.path}`}
-											>
-												<button className="browser-list-button" onClick={() => void openDocument(entry.item)} title={archiveVirtualPath(entry.item, workspaceRoots)} type="button">
-													<FileText size={15} />
-													<div className="browser-row-copy">
-														<strong>{entry.item.name}</strong>
-														<span>{archiveVirtualDirectory(entry.item, workspaceRoots) || '根目录'}</span>
-														<div className="archive-result-meta">
-															<span className="archive-result-path">{archiveVirtualPath(entry.item, workspaceRoots)}</span>
-															<span className={`match-kind match-kind-${entry.item.matchKind}`}>
-																{entry.item.matchKind === 'directory'
-																	? '目录'
-																	: entry.item.matchKind === 'type'
-																		? '类型'
-																		: entry.item.matchKind === 'path'
-																			? '路径'
-																			: entry.item.matchKind === 'content'
-																				? '内容'
-																				: '名称'}
-															</span>
-															{entry.item.extension ? <span className="match-kind match-kind-type">{entry.item.extension}</span> : null}
-														</div>
-													</div>
-												</button>
-												<div className="browser-inline-actions">
-													{selectedArchiveId ? (
-														<button onClick={() => void detachFromArchive(entry.item.path)} type="button">
-															移除
-														</button>
-													) : null}
-													<button onClick={() => void revealInWorkspace(entry.item)} type="button">
-														定位
-													</button>
-												</div>
-											</div>
-										)
-									)}
-								</>
-							) : (
-								<div className="browser-empty">
-									{archiveQuery || archiveFileTypeFilter
-										? archiveMatchFilter === 'content' && !isCommittedArchiveSearch
-											? '内容匹配需要执行深搜，当前还没有返回结果。'
-											: '当前搜索条件下没有匹配文件或目录。'
-										: '当前归档为空，或者索引里还没有可显示文件。'}
-								</div>
-							)
-						) : (
-							<div className="browser-empty">先在下方选择一个自动分类或手动归档。</div>
-						)}
-					</section>
-					<section className="browser-section archive-targets-section">
-						<header className="browser-section-header">
-							<h3>自动分类</h3>
-						</header>
-						{workbench.autoCategories.length ? (
-							workbench.autoCategories.map((category) => (
-								<button
-									className={`browser-list-button ${selectedAutoCategoryId === category.id ? 'active' : ''}`}
-									key={category.id}
-									onClick={() => {
-										void loadAutoCategory(category, {
-											query: '',
-											matchField: archiveMatchFilter,
-											caseSensitive: archiveCaseSensitive,
-											fileType: normalizedArchiveFileType
-										});
-									}}
-									title={`${category.label} (${category.count})`}
-									type="button"
-								>
-									<Archive size={15} />
-									<div className="browser-row-copy">
-										<strong>{category.label}</strong>
-										<span>{category.count} 个文件</span>
-									</div>
-								</button>
-							))
-						) : (
-							<div className="browser-empty">索引完成后会在这里显示自动分类。</div>
-						)}
-					</section>
-					<section className="browser-section archive-targets-section">
-						<header className="browser-section-header">
-							<h3>手动归档</h3>
-							<button onClick={requestCreateArchive} type="button">
-								<Plus size={14} />
-								新建
-							</button>
-						</header>
-						{workbench.virtualFolders.length ? (
-							workbench.virtualFolders.map((folder) => (
-								<div className={`browser-row-card ${selectedArchiveId === folder.id ? 'active' : ''}`} key={folder.id}>
-									<button
-										className="browser-list-button"
-										onClick={() => {
-											void loadArchive(folder.id, {
-												query: '',
-												matchField: archiveMatchFilter,
-												caseSensitive: archiveCaseSensitive,
-												fileType: normalizedArchiveFileType
-											});
-										}}
-										title={folder.name}
-										type="button"
-									>
-										<Archive size={15} />
-										<div className="browser-row-copy">
-											<strong>{folder.name}</strong>
-											<span>{folder.preferredRootId || '未设置默认根目录'}</span>
-										</div>
-									</button>
-									<div className="browser-inline-actions">
-										<button onClick={() => requestRenameArchive(folder.id, folder.name)} type="button">
-											<PencilLine size={14} />
-										</button>
-										<button onClick={() => requestDeleteArchive(folder.id, folder.name)} type="button">
-											<Trash2 size={14} />
-										</button>
-									</div>
-								</div>
-							))
-						) : (
-							<div className="browser-empty">暂无归档。</div>
-						)}
-					</section>
-				</div>
-			);
-		}
-
-		if (sourceMode === 'recent') {
-			return (
-				<div className="browser-stack">
-					<section className="browser-section">
-						<header className="browser-section-header">
-							<h3>最近文件</h3>
-						</header>
-						{workbench.recentItems.length ? (
-							workbench.recentItems.map((item) => (
-								<button
-									className="browser-list-button"
-									key={item.path}
-									onClick={() =>
-										void openDocument({
-											...item,
-											virtualFolderIds: [],
-											matchKind: 'name',
-											extension: extensionFromPath(item.path)
-										})
-									}
-									title={item.path}
-									type="button"
-								>
-									<FileText size={15} />
-									<div className="browser-row-copy">
-										<strong>{item.name}</strong>
-										<span>{item.path}</span>
-									</div>
-								</button>
-							))
-						) : (
-							<div className="browser-empty">暂无最近文件。</div>
-						)}
-					</section>
-					<section className="browser-section">
-						<header className="browser-section-header">
-							<h3>最近工作区</h3>
-						</header>
-						{workbench.recentWorkspaces.length ? (
-							workbench.recentWorkspaces.map((item) => (
-								<button className="browser-list-button" key={item.path} onClick={() => void openRecentWorkspace(item.path)} title={item.path} type="button">
-									<Folder size={15} />
-									<div className="browser-row-copy">
-										<strong>{item.label}</strong>
-										<span>{item.path}</span>
-									</div>
-								</button>
-							))
-						) : (
-							<div className="browser-empty">暂无最近工作区。</div>
-						)}
-					</section>
-				</div>
-			);
-		}
-
-		if (sourceMode === 'help') {
-			return workbench.helpDocs.length ? (
-				<div className="browser-stack">
-					{workbench.helpDocs.map((doc: HelpDoc) => (
-						<button
-							className={`browser-list-button ${selectedHelpDoc === doc.id ? 'active' : ''}`}
-							key={doc.id}
-							onClick={() => {
-								setSelectedHelpDoc(doc.id);
-								setLoadedHelpDocId('');
-							}}
-							title={doc.title}
-							type="button"
-						>
-							<CircleHelp size={15} />
-							<div className="browser-row-copy">
-								<strong>{doc.title}</strong>
-								<span>{doc.id}</span>
-							</div>
-						</button>
-					))}
-				</div>
-			) : (
-				<div className="browser-empty">当前没有可读取的帮助文档。</div>
-			);
-		}
-
-		return searchResults.length ? (
-			<div className="browser-stack">
-				{searchResults.map((item) => (
-					<div className="browser-row-card" key={`${item.rootId}:${item.path}`}>
-						<button className="browser-list-button" onClick={() => void openDocument(item)} title={item.path} type="button">
-							<FileSearch size={15} />
-							<div className="browser-row-copy">
-								<strong>{item.name}</strong>
-								<span>{item.path}</span>
-								<div className="archive-result-meta">
-									<span className={`match-kind match-kind-${item.matchKind}`}>
-										{item.matchKind === 'directory'
-											? '目录'
-											: item.matchKind === 'type'
-												? '类型'
-												: item.matchKind === 'path'
-													? '路径'
-													: item.matchKind === 'content'
-														? '内容'
-														: '名称'}
-									</span>
-									{item.extension ? <span className="match-kind match-kind-type">{item.extension}</span> : null}
-								</div>
-							</div>
-						</button>
-						<div className="browser-inline-actions">
-							<button onClick={() => void revealInWorkspace(item)} type="button">
-								定位
-							</button>
-							{selectedArchiveId ? (
-								<button onClick={() => void attachSearchResultToSelectedArchive(item)} type="button">
-									归档
-								</button>
-							) : null}
-						</div>
-					</div>
-				))}
-			</div>
-		) : (
-			<div className="browser-empty">没有匹配结果。</div>
-		);
-	})();
+			onOpenRecentWorkspace={openRecentWorkspace}
+			onOpenArchiveExplorer={openArchiveExplorer}
+			onOpenWorkspace={openWorkspace}
+			onRequestCreateArchive={requestCreateArchive}
+			onRequestCreatePhysical={requestCreatePhysical}
+			onRequestDeleteArchive={requestDeleteArchive}
+			onRequestDeleteNode={requestDeleteNode}
+			onRequestRemoveRoot={requestRemoveRoot}
+			onRequestRenameArchive={requestRenameArchive}
+			onRequestRenameNode={requestRenameNode}
+			onRevealInWorkspace={revealInWorkspace}
+			onRunArchiveSearch={runArchiveSearch}
+			onSelectHelpDoc={(docId) => {
+				setSelectedHelpDoc(docId);
+				setLoadedHelpDocId('');
+			}}
+			onSetActiveRoot={setActiveRoot}
+			onSetArchiveCaseSensitive={setArchiveCaseSensitive}
+			onSetArchiveFileTypeFilter={setArchiveFileTypeFilter}
+			onSetArchiveFolderPath={setArchiveFolderPath}
+			onSetArchiveMatchFilter={setArchiveMatchFilter}
+			onSetArchiveQuery={setArchiveQuery}
+			onSetArchiveResultCursor={setArchiveResultCursor}
+			onSetArchiveSuggestionCursor={setArchiveSuggestionCursor}
+			onSetDefaultRoot={setDefaultRoot}
+			onToggleTreeNode={toggleTreeNode}
+			searchResults={searchResults}
+			selectedArchive={selectedArchive}
+			selectedArchiveId={selectedArchiveId}
+			selectedAutoCategory={selectedAutoCategory}
+			selectedAutoCategoryId={selectedAutoCategoryId}
+			selectedHelpDoc={selectedHelpDoc}
+			selectedWorkspacePath={selectedWorkspacePath}
+			sourceMode={sourceMode}
+			workbench={workbench}
+		/>
+	);
 
 	const contentView = (() => {
 		if (sourceMode === 'help') {
@@ -2454,6 +2101,44 @@ export function WorkbenchApp() {
 			);
 		}
 
+		if (sourceMode === 'archives' && workbench && currentArchiveSource && currentArchiveExplorerState?.expanded) {
+			return (
+				<ArchiveExplorerView
+					baseUrl={baseUrl}
+					browseFiles={archiveBrowseResponse?.files ?? []}
+					browseFolders={archiveBrowseResponse?.folders ?? []}
+					currentFolderPath={archiveBrowseResponse?.currentFolderPath ?? currentArchiveExplorerState.folderPath}
+					error={archiveBrowseError}
+					explorerState={currentArchiveExplorerState}
+					loading={archiveBrowseLoading}
+					nextCursor={archiveBrowseResponse?.nextCursor ?? -1}
+					onCollapse={collapseArchiveExplorer}
+					onNextPage={goToNextArchiveBrowsePage}
+					onOpenExternal={openExternal}
+					onOpenFile={(file) => openDocument(file)}
+					onPrevPage={goToPreviousArchiveBrowsePage}
+					onSelectArchive={(folder) => openArchiveFolderExplorer(folder)}
+					onSelectAutoCategory={(category) => openArchiveCategoryExplorer(category)}
+					onSelectFile={(file) => setArchiveExplorerSelectedPath(file.path)}
+					onSelectNavTab={setArchiveExplorerNavTab}
+					onSetFolderPath={setArchiveExplorerFolderPath}
+					onSetGroupView={setArchiveExplorerGroupView}
+					onSetQuery={setArchiveExplorerQuery}
+					onSetSearchMode={setArchiveExplorerSearchMode}
+					onSetSortBy={setArchiveExplorerSortBy}
+					onSetSortDirection={setArchiveExplorerSortDirection}
+					prefetchedContent={selectedArchivePrefetchedContent}
+					selectedArchive={selectedArchive}
+					selectedArchiveId={selectedArchiveId}
+					selectedAutoCategory={selectedAutoCategory}
+					selectedAutoCategoryId={selectedAutoCategoryId}
+					selectedFile={selectedArchiveBrowseFile}
+					totalFiles={archiveBrowseResponse?.totalFiles ?? 0}
+					totalFolders={archiveBrowseResponse?.totalFolders ?? 0}
+					workbench={workbench}
+				/>
+			);
+		}
 		if (activeTab && currentFile) {
 			const previewExtension = (activeTab.extension || '').toLowerCase();
 			const canSidePreview = activeTab.kind === 'text';
@@ -3011,3 +2696,13 @@ export function WorkbenchApp() {
 		</div>
 	);
 }
+
+
+
+
+
+
+
+
+
+

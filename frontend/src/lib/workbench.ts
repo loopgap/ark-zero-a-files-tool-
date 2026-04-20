@@ -1,4 +1,4 @@
-import type { OpenTab, SearchHit, TreeNode, WorkbenchState } from './types';
+import type { ArchiveBrowseFile, OpenTab, SearchHit, TreeNode, WorkbenchState } from './types';
 
 export type SourceMode = 'workspace' | 'archives' | 'recent' | 'help' | 'search';
 export type ThemeName = 'minimal-dark' | 'minimal-light';
@@ -115,7 +115,9 @@ export function classifyExtension(extension?: string): OpenTab['kind'] {
 	return 'binary';
 }
 
-export function toOpenTab(item: TreeNode | SearchHit): OpenTab {
+type OpenableWorkbenchItem = Pick<TreeNode, 'path' | 'name' | 'rootId' | 'extension'> & { virtualFolderIds?: string[] };
+
+export function toOpenTab(item: OpenableWorkbenchItem | ArchiveBrowseFile | SearchHit): OpenTab {
 	const extension = item.extension || extensionFromPath(item.path);
 	const filename = filenameFromPath(item.path);
 	return {
