@@ -70,6 +70,8 @@
   - Windows / Linux 桌面 smoke build 与 artifact 上传
 - `release` workflow：
   - preflight
+  - `go test ./...`
+  - `npm run check`
   - Windows / Ubuntu matrix 打包
   - checksum 汇总
   - GitHub Release 发布

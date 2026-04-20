@@ -169,9 +169,13 @@ func runRelease() {
 		os.Exit(1)
 	}
 
-	runDoctor()
-	runFrontendCheck()
-	runTest()
+	if shouldSkipReleaseValidation() {
+		fmt.Println("ℹ️  [release] 跳过本地校验，直接进入打包")
+	} else {
+		runDoctor()
+		runFrontendCheck()
+		runTest()
+	}
 
 	outputs, err := buildDesktop(true)
 	if err != nil {
@@ -375,6 +379,11 @@ func frontendTypecheckBinary() string {
 		name += ".cmd"
 	}
 	return filepath.Join("frontend", "node_modules", ".bin", name)
+}
+
+func shouldSkipReleaseValidation() bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("ARKKB_RELEASE_SKIP_VALIDATION")))
+	return value == "1" || value == "true" || value == "yes"
 }
 
 func mustPrintCommandVersion(name string, args ...string) {

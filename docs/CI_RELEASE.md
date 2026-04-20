@@ -58,11 +58,11 @@ go run scripts/dev.go release
    - 决定是否发布 release
 2. `validate`
    - 运行 `go run scripts/dev.go preflight`
+   - 运行 `go test ./...`
+   - 运行 `npm run check`
 3. `build`
    - Windows / Ubuntu matrix
    - `doctor`
-   - 前端校验
-   - 后端测试
    - `go run scripts/dev.go release`
    - 上传 `bin/release/<os>/` 产物
 4. `publish`

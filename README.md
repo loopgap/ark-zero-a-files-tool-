@@ -48,7 +48,7 @@ go run scripts/dev.go release
 
 - `preflight` 现在只做校验，不会回写版本文件；发布前必须先显式提交 `VERSION`、`frontend/package.json`、`frontend/package-lock.json`、`frontend/src-tauri/tauri.conf.json` 与 `frontend/src-tauri/Cargo.toml` 的目标版本。
 - `ci` 工作流负责 preflight、后端测试、前端类型检查、前端构建，以及 Windows / Ubuntu 双平台桌面 smoke build 与产物上传。
-- `release` 工作流负责 Windows / Linux matrix 打包、checksum 汇总与 GitHub Release 发布。
+- `release` 工作流先在公共 `validate` job 完成 preflight、Go tests 和前端检查，再执行 Windows / Linux matrix 打包、checksum 汇总与 GitHub Release 发布。
 - 发布顺序固定为：先提交目标版本源码并推送 `develop`，等待双平台 CI 通过，再推 `vX.Y.Z` tag 触发正式 release。
 
 ## 文档入口
