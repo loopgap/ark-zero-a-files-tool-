@@ -9,7 +9,7 @@
 2. `docs/HELP.md`
    - 面向使用者的工作区、归档、搜索、预览说明
 3. `docs/DEVELOPER.md`
-   - 面向开发者的运行时结构、归档浏览模型与 Git 约束
+   - 面向开发者的运行时结构、归档浏览模型、Git 约束与文档规范
 4. `docs/WORKSPACE_ARCHITECTURE.md`
    - 整个工作区的目录结构、关键文件、源码与产物边界
 5. `docs/CI_RELEASE.md`

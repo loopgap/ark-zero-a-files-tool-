@@ -54,7 +54,7 @@ go run scripts/dev.go release
 ## 文档入口
 
 - 用户帮助：`docs/HELP.md`
-- 开发说明：`docs/DEVELOPER.md`
+- 开发说明：`docs/DEVELOPER.md` (包含文档规范与 Git 约束)
 - 工作区文件架构：`docs/WORKSPACE_ARCHITECTURE.md`
 - CI / Release 说明：`docs/CI_RELEASE.md`
 - 文档索引 / Wiki：`docs/WIKI.md`
