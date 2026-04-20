@@ -200,6 +200,12 @@ func (s *Server) dispatch(method string, params json.RawMessage) (interface{}, e
 			return nil, err
 		}
 		return s.Bridge.ListVirtualFolderItems(payload.FolderID)
+	case "archive.browse":
+		var payload bridge.ArchiveBrowseRequest
+		if err := decodeParams(params, &payload); err != nil {
+			return nil, err
+		}
+		return s.Bridge.BrowseArchive(payload)
 	case "archive.create":
 		var payload struct {
 			Name string `json:"name"`

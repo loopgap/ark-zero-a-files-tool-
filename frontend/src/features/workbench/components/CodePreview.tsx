@@ -9,13 +9,16 @@ import { loadLanguageExtension } from './languageSupport';
 type CodePreviewProps = {
 	file: TreeNode;
 	onError: (message: string) => void;
+	prefetchedContent?: string | null;
 };
 
 const languageCompartment = new Compartment();
 
-export function CodePreview({ file, onError }: CodePreviewProps) {
+export function CodePreview({ file, onError, prefetchedContent }: CodePreviewProps) {
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const viewRef = useRef<EditorView | null>(null);
+	const loadedPathRef = useRef('');
+	const loadedContentRef = useRef<string | null>(null);
 	const onErrorRef = useRef(onError);
 
 	useEffect(() => {
@@ -71,10 +74,19 @@ export function CodePreview({ file, onError }: CodePreviewProps) {
 	}, []);
 
 	useEffect(() => {
-		let cancelled = false;
-		void Promise.all([rpc<string>('fs.read', { path: file.path }), loadLanguageExtension(file.path)])
+		const view = viewRef.current;
+		if (!view || !file.path) return;
+
+		let isCancelled = false;
+		const loadContent = prefetchedContent != null ? Promise.resolve(prefetchedContent) : rpc<string>('fs.read', { path: file.path });
+
+		Promise.all([loadContent, loadLanguageExtension(file.path)])
 			.then(([content, languageExtension]) => {
-				if (!viewRef.current || cancelled) return;
+				if (isCancelled || !viewRef.current) return;
+				if (loadedPathRef.current === file.path && loadedContentRef.current === (content ?? '')) return;
+
+				loadedPathRef.current = file.path;
+				loadedContentRef.current = content ?? '';
 				viewRef.current.dispatch({
 					effects: languageCompartment.reconfigure(languageExtension),
 					changes: {
@@ -85,15 +97,15 @@ export function CodePreview({ file, onError }: CodePreviewProps) {
 				});
 			})
 			.catch((error) => {
-				if (!cancelled) {
+				if (!isCancelled) {
 					onErrorRef.current(describeError(error, '预览读取失败。'));
 				}
 			});
 
 		return () => {
-			cancelled = true;
+			isCancelled = true;
 		};
-	}, [file.path]);
+	}, [file.path, prefetchedContent]);
 
 	return <div className="code-preview-surface" ref={containerRef} />;
 }

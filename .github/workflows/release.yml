@@ -4,12 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Optional tag like v0.1.0 to publish after both platform builds pass
+        description: Optional tag like v0.2.0 to publish after both platform builds pass
         required: false
         type: string
+      draft:
+        description: Publish as draft when a release tag is provided manually
+        required: false
+        default: false
+        type: boolean
   push:
     tags:
       - "v*"
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -20,6 +29,7 @@ jobs:
     outputs:
       release_tag: ${{ steps.resolve.outputs.release_tag }}
       publish: ${{ steps.resolve.outputs.publish }}
+      draft: ${{ steps.resolve.outputs.draft }}
     steps:
       - id: resolve
         shell: bash
@@ -27,12 +37,15 @@ jobs:
           if [ "${{ github.event_name }}" = "push" ]; then
             echo "release_tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
             echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "draft=false" >> "$GITHUB_OUTPUT"
           elif [ -n "${{ inputs.release_tag }}" ]; then
             echo "release_tag=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
             echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "draft=${{ inputs.draft }}" >> "$GITHUB_OUTPUT"
           else
             echo "release_tag=" >> "$GITHUB_OUTPUT"
             echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "draft=false" >> "$GITHUB_OUTPUT"
           fi
 
   validate:
@@ -63,7 +76,7 @@ jobs:
             artifact_name: arkkb-windows-release
           - os: ubuntu-22.04
             target_os: linux
-            artifact_name: arkkb-ubuntu-release
+            artifact_name: arkkb-linux-release
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -131,6 +144,7 @@ jobs:
           name: ${{ matrix.artifact_name }}
           path: bin/release/${{ matrix.target_os }}
           if-no-files-found: error
+          retention-days: 14
 
   publish:
     if: needs.prepare.outputs.publish == 'true'
@@ -148,15 +162,31 @@ jobs:
       - name: Collect release assets
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p release
-          find dist -type f ! -name 'checksums-*.txt' -exec cp {} release/ \;
-          find dist -type f -name 'checksums-*.txt' -print0 | xargs -0 cat | sort > release/checksums.txt
+
+          mapfile -d '' asset_files < <(find dist -type f ! -name 'checksums-*.txt' -print0)
+          if [ "${#asset_files[@]}" -eq 0 ]; then
+            echo "no packaged release assets found under dist" >&2
+            exit 1
+          fi
+          cp "${asset_files[@]}" release/
+
+          mapfile -d '' checksum_files < <(find dist -type f -name 'checksums-*.txt' -print0)
+          if [ "${#checksum_files[@]}" -eq 0 ]; then
+            echo "no checksum files found under dist" >&2
+            exit 1
+          fi
+          cat "${checksum_files[@]}" | sort > release/checksums.txt
+
+          ls -la release
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.release_tag }}
           target_commitish: ${{ github.sha }}
-          draft: false
+          draft: ${{ needs.prepare.outputs.draft == 'true' }}
           prerelease: false
+          generate_release_notes: true
           files: release/*

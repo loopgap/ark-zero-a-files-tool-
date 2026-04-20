@@ -1,0 +1,125 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Release preflight
+        run: go run scripts/dev.go preflight
+
+      - name: Go tests
+        run: go test ./...
+
+      - name: Frontend typecheck
+        working-directory: frontend
+        run: npm run check
+
+      - name: Frontend build
+        working-directory: frontend
+        run: npm run build
+
+  desktop-smoke:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target_os: windows
+            artifact_name: arkkb-windows-ci-smoke
+          - os: ubuntu-22.04
+            target_os: linux
+            artifact_name: arkkb-linux-ci-smoke
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: frontend/src-tauri
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install Linux desktop dependencies
+        if: matrix.target_os == 'linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            javascriptcoregtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            wget
+
+      - name: Doctor
+        env:
+          ARKKB_TARGET_OS: ${{ matrix.target_os }}
+        run: go run scripts/dev.go doctor
+
+      - name: Desktop smoke build
+        env:
+          ARKKB_TARGET_OS: ${{ matrix.target_os }}
+        run: go run scripts/dev.go build
+
+      - name: Upload CI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            bin/
+            frontend/build/
+          if-no-files-found: error
+          retention-days: 14

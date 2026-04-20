@@ -66,7 +66,7 @@ func printUsage() {
 	fmt.Println("  doctor  - 环境体检 (Check dependencies)")
 	fmt.Println("  test    - 自动化测试 (Run unit tests)")
 	fmt.Println("  bench   - 性能压测 (Run performance benchmarks)")
-	fmt.Println("  ci      - CI 管道流水线 (Run full CI pipeline)")
+	fmt.Println("  ci      - 严格发布前校验 (Run strict pre-push checks)")
 	fmt.Println("  stress  - 异常仿真测试 (Simulate failures & corruption)")
 	fmt.Println("  release - 生产发布打包 (Package for production)")
 	fmt.Println("  preflight - 发布前校验 (Validate release inputs)")
@@ -117,13 +117,23 @@ func runTest() {
 }
 
 func runCI() {
-	fmt.Println("🚀 [ci] 启动全自动化流水线...")
+	fmt.Println("🚀 [ci] 启动严格发布前检查...")
+	releaseVersion, err := resolveReleaseVersion()
+	if err != nil {
+		fmt.Printf("❌ 版本解析失败: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("🏷️  [ci] 使用版本: %s\n", releaseVersion)
+	if err := runReleasePreflight(releaseVersion); err != nil {
+		fmt.Printf("❌ 发布前校验失败: %v\n", err)
+		os.Exit(1)
+	}
 	runDoctor()
 	runFrontendCheck()
 	runTest()
-	runBench()
+	runDesktopCheck()
 	runBuild()
-	fmt.Println("🎉 [ci] 流水线运行成功，产物已就绪。")
+	fmt.Println("🎉 [ci] 严格发布前检查通过，产物已就绪。")
 }
 
 func runStress() {
@@ -148,9 +158,9 @@ func runStress() {
 
 func runRelease() {
 	fmt.Println("📦 [release] 开始生产级打包...")
-	releaseVersion, err := prepareReleaseVersion()
+	releaseVersion, err := resolveReleaseVersion()
 	if err != nil {
-		fmt.Printf("❌ 版本准备失败: %v\n", err)
+		fmt.Printf("❌ 版本解析失败: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("🏷️  [release] 使用版本: %s\n", releaseVersion)
@@ -168,7 +178,7 @@ func runRelease() {
 		fmt.Printf("❌ 发布构建失败: %v\n", err)
 		os.Exit(1)
 	}
-	if err := packageReleaseArtifacts(outputs); err != nil {
+	if err := packageReleaseArtifacts(outputs, releaseVersion); err != nil {
 		fmt.Printf("❌ 发布产物整理失败: %v\n", err)
 		os.Exit(1)
 	}
@@ -177,9 +187,9 @@ func runRelease() {
 
 func runPreflight() {
 	fmt.Println("🛂 [preflight] 执行发布前校验...")
-	releaseVersion, err := prepareReleaseVersion()
+	releaseVersion, err := resolveReleaseVersion()
 	if err != nil {
-		fmt.Printf("❌ 版本准备失败: %v\n", err)
+		fmt.Printf("❌ 版本解析失败: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("🏷️  [preflight] 使用版本: %s\n", releaseVersion)
@@ -253,6 +263,18 @@ func runFrontendCheck() {
 	}
 }
 
+func runDesktopCheck() {
+	fmt.Println("🧪 [desktop] 运行 Tauri cargo check...")
+	checkCmd := exec.Command("cargo", "check")
+	checkCmd.Dir = filepath.Join("frontend", "src-tauri")
+	checkCmd.Stdout = os.Stdout
+	checkCmd.Stderr = os.Stderr
+	if err := checkCmd.Run(); err != nil {
+		fmt.Printf("❌ Tauri cargo check 失败: %v\n", err)
+		os.Exit(1)
+	}
+}
+
 func buildDesktop(bundle bool) (buildOutputs, error) {
 	if err := os.MkdirAll("bin", 0755); err != nil {
 		return buildOutputs{}, err
@@ -320,14 +342,39 @@ func buildDesktop(bundle bool) (buildOutputs, error) {
 }
 
 func ensureFrontendDeps() {
+	if err := ensureFileExists(frontendTypecheckBinary()); err == nil {
+		fmt.Println("ℹ️  [check] 复用现有 frontend/node_modules")
+		return
+	}
+
+	cacheDir, err := filepath.Abs(filepath.Join(".tmp", "npm-cache"))
+	if err != nil {
+		fmt.Printf("❌ 无法解析 npm cache 目录: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		fmt.Printf("❌ 无法创建 npm cache 目录: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("📦 [check] 安装 frontend 依赖...")
 	installCmd := exec.Command("npm", "ci")
 	installCmd.Dir = "frontend"
+	installCmd.Env = append(os.Environ(), "npm_config_cache="+cacheDir)
 	installCmd.Stdout = os.Stdout
 	installCmd.Stderr = os.Stderr
 	if err := installCmd.Run(); err != nil {
 		fmt.Printf("❌ Frontend npm ci 失败: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func frontendTypecheckBinary() string {
+	name := "tsc"
+	if runtime.GOOS == "windows" {
+		name += ".cmd"
+	}
+	return filepath.Join("frontend", "node_modules", ".bin", name)
 }
 
 func mustPrintCommandVersion(name string, args ...string) {
@@ -397,8 +444,8 @@ func copyFile(src string, dst string) error {
 	return out.Close()
 }
 
-func packageReleaseArtifacts(outputs buildOutputs) error {
-	artifacts, err := collectBundledArtifacts(outputs.bundleDir)
+func packageReleaseArtifacts(outputs buildOutputs, releaseVersion string) error {
+	artifacts, err := collectBundledArtifacts(outputs.bundleDir, releaseVersion)
 	if err != nil {
 		return err
 	}
@@ -429,7 +476,7 @@ func packageReleaseArtifacts(outputs buildOutputs) error {
 	return os.WriteFile(checksumPath, []byte(strings.Join(lines, "\n")+"\n"), 0644)
 }
 
-func collectBundledArtifacts(bundleDir string) ([]string, error) {
+func collectBundledArtifacts(bundleDir string, releaseVersion string) ([]string, error) {
 	info, err := os.Stat(bundleDir)
 	if err != nil {
 		return nil, err
@@ -462,6 +509,9 @@ func collectBundledArtifacts(bundleDir string) ([]string, error) {
 		if !allowed[ext] {
 			return nil
 		}
+		if releaseVersion != "" && !strings.Contains(filepath.Base(path), releaseVersion) {
+			return nil
+		}
 		artifacts = append(artifacts, path)
 		return nil
 	})
@@ -469,6 +519,9 @@ func collectBundledArtifacts(bundleDir string) ([]string, error) {
 		return nil, err
 	}
 	if len(artifacts) == 0 {
+		if releaseVersion != "" {
+			return nil, fmt.Errorf("no bundled artifacts found in %s for version %s", bundleDir, releaseVersion)
+		}
 		return nil, fmt.Errorf("no bundled artifacts found in %s", bundleDir)
 	}
 	sort.Strings(artifacts)
@@ -598,17 +651,6 @@ func validateSidecarRPC(sidecarBinary string) error {
 	return nil
 }
 
-func prepareReleaseVersion() (string, error) {
-	version, err := resolveReleaseVersion()
-	if err != nil {
-		return "", err
-	}
-	if err := syncVersionFiles(version); err != nil {
-		return "", err
-	}
-	return version, nil
-}
-
 func resolveReleaseVersion() (string, error) {
 	tag := strings.TrimSpace(os.Getenv("ARKKB_RELEASE_TAG"))
 	if tag != "" {
@@ -647,71 +689,6 @@ func semverFromTag(tag string) (string, error) {
 
 func isSemver(version string) bool {
 	return regexp.MustCompile(`^\d+\.\d+\.\d+$`).MatchString(strings.TrimSpace(version))
-}
-
-func syncVersionFiles(version string) error {
-	if err := os.WriteFile("VERSION", []byte(version+"\n"), 0644); err != nil {
-		return fmt.Errorf("write VERSION: %w", err)
-	}
-
-	if err := updateJSONVersion(filepath.Join("frontend", "package.json"), version); err != nil {
-		return err
-	}
-	if err := updateJSONVersion(filepath.Join("frontend", "src-tauri", "tauri.conf.json"), version); err != nil {
-		return err
-	}
-	if err := updateCargoPackageVersion(filepath.Join("frontend", "src-tauri", "Cargo.toml"), version); err != nil {
-		return err
-	}
-	return nil
-}
-
-func updateJSONVersion(path string, version string) error {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
-	}
-	re := regexp.MustCompile(`(?m)("version"\s*:\s*")([^"]+)(")`)
-	if !re.Match(content) {
-		return fmt.Errorf("version missing in %s", path)
-	}
-	updated := re.ReplaceAll(content, []byte(`${1}`+version+`${3}`))
-	if string(updated) == string(content) {
-		return nil
-	}
-	if err := os.WriteFile(path, updated, 0644); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
-	}
-	return nil
-}
-
-func updateCargoPackageVersion(path string, version string) error {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
-	}
-	lines := strings.Split(string(content), "\n")
-	inPackage := false
-	updated := false
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
-			inPackage = trimmed == "[package]"
-			continue
-		}
-		if inPackage && strings.HasPrefix(trimmed, "version") {
-			lines[i] = "version = \"" + version + "\""
-			updated = true
-			break
-		}
-	}
-	if !updated {
-		return fmt.Errorf("package version not found in %s", path)
-	}
-	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
-	}
-	return nil
 }
 
 func runReleasePreflight(expectedVersion string) error {

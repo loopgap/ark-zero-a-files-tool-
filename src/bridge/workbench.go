@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"arkkb/src/core/config"
+	"arkkb/src/core/storage"
 	coreSync "arkkb/src/core/sync"
 	"arkkb/src/utils/pathutil"
 )
@@ -43,6 +44,47 @@ type SearchOptions struct {
 	MatchField      string `json:"matchField"`
 	CaseSensitive   bool   `json:"caseSensitive"`
 	FileType        string `json:"fileType"`
+	Limit           int    `json:"limit"`
+}
+
+type ArchiveBrowseRequest struct {
+	SourceKind    string `json:"sourceKind"`
+	SourceID      string `json:"sourceId"`
+	FolderPath    string `json:"folderPath"`
+	Query         string `json:"query"`
+	SearchMode    string `json:"searchMode"`
+	SortBy        string `json:"sortBy"`
+	SortDirection string `json:"sortDirection"`
+	PageSize      int    `json:"pageSize"`
+	Cursor        int    `json:"cursor"`
+}
+
+type ArchiveBrowseFolder struct {
+	Name  string `json:"name"`
+	Path  string `json:"path"`
+	Count int    `json:"count"`
+}
+
+type ArchiveBrowseFile struct {
+	Path             string   `json:"path"`
+	Name             string   `json:"name"`
+	RootID           string   `json:"rootId"`
+	VirtualFolderIDs []string `json:"virtualFolderIds"`
+	MatchKind        string   `json:"matchKind"`
+	Extension        string   `json:"extension"`
+	RelativePath     string   `json:"relativePath"`
+	Directory        string   `json:"directory"`
+	ModifiedAt       int64    `json:"modifiedAt"`
+	LastOpenedAt     int64    `json:"lastOpenedAt"`
+}
+
+type ArchiveBrowseResponse struct {
+	Folders           []ArchiveBrowseFolder `json:"folders"`
+	Files             []ArchiveBrowseFile   `json:"files"`
+	TotalFiles        int                   `json:"totalFiles"`
+	TotalFolders      int                   `json:"totalFolders"`
+	NextCursor        int                   `json:"nextCursor"`
+	CurrentFolderPath string                `json:"currentFolderPath"`
 }
 
 type HelpDoc struct {
@@ -88,7 +130,7 @@ func (b *Bridge) GetWorkbenchState() (*WorkbenchState, error) {
 		Policy:           cfg.Policy,
 		RecentItems:      cfg.RecentItems,
 		RecentWorkspaces: cfg.RecentWorkspaces,
-		HelpDocs:         readableHelpDocs(),
+		HelpDocs:         b.readableHelpDocs(),
 		Language:         cfg.Language,
 		Theme:            config.NormalizeThemeName(stringValue(cfg.ViewSettings["theme"], "minimal-dark")),
 	}
@@ -123,6 +165,32 @@ func (b *Bridge) ListVirtualFolderItems(folderID string) ([]SearchHit, error) {
 	return b.SearchFiles(SearchOptions{VirtualFolderID: folderID})
 }
 
+func (b *Bridge) BrowseArchive(request ArchiveBrowseRequest) (*ArchiveBrowseResponse, error) {
+	cfg, err := b.storage.KV.GetAppConfig()
+	if err != nil {
+		return nil, err
+	}
+	metas, err := b.storage.KV.ListFileMetas()
+	if err != nil {
+		return nil, err
+	}
+	memberships, err := b.storage.KV.ListAllVirtualFolderMemberships()
+	if err != nil {
+		return nil, err
+	}
+
+	recentAccess := map[string]int64{}
+	for _, item := range cfg.RecentItems {
+		recentAccess[item.Path] = item.LastAccessed
+	}
+
+	files, err := b.buildArchiveBrowseFiles(cfg, metas, memberships, request, recentAccess)
+	if err != nil {
+		return nil, err
+	}
+	return buildArchiveBrowseResponse(files, request), nil
+}
+
 func (b *Bridge) ListAutoCategories() ([]config.AutoCategory, error) {
 	return b.computeAutoCategories()
 }
@@ -141,7 +209,7 @@ func (b *Bridge) SavePolicyConfig(policy config.PolicyConfig) error {
 }
 
 func (b *Bridge) ReadHelpDoc(docID string) (string, error) {
-	data, err := readHelpDoc(docID)
+	data, err := b.readHelpDoc(docID)
 	if err != nil {
 		return "", err
 	}
@@ -160,7 +228,7 @@ func (b *Bridge) AddWorkspaceRoot(path string) (*config.WorkspaceRoot, error) {
 		return nil, nil
 	}
 
-	normalizedPath, err := pathutil.NormalizePath(path)
+	normalizedPath, err := canonicalizeMaybeMissingPath(path, false)
 	if err != nil {
 		return nil, err
 	}
@@ -335,32 +403,32 @@ func (b *Bridge) DeleteVirtualFolder(folderID string) error {
 }
 
 func (b *Bridge) AttachFileToVirtualFolder(path string, folderID string) error {
-	normalizedPath, err := pathutil.NormalizePath(path)
+	resolvedPath, err := b.ResolveWorkspacePath(path)
 	if err != nil {
 		return err
 	}
-	if err := b.storage.KV.AddVirtualFolderMembership(normalizedPath, folderID); err != nil {
+	if err := b.storage.KV.AddVirtualFolderMembership(resolvedPath.CanonicalPath, folderID); err != nil {
 		return err
 	}
-	if err := b.updateVirtualFolderTarget(folderID, normalizedPath, b.rootIDForPath(normalizedPath)); err != nil {
+	if err := b.updateVirtualFolderTarget(folderID, resolvedPath.CanonicalPath, resolvedPath.RootID); err != nil {
 		return err
 	}
 	if b.syncEngine != nil {
-		return b.syncEngine.SyncPath(b.rootIDForPath(normalizedPath), filepath.FromSlash(normalizedPath))
+		return b.syncEngine.SyncPath(resolvedPath.RootID, filepath.FromSlash(resolvedPath.CanonicalPath))
 	}
 	return nil
 }
 
 func (b *Bridge) DetachFileFromVirtualFolder(path string, folderID string) error {
-	normalizedPath, err := pathutil.NormalizePath(path)
+	resolvedPath, err := b.ResolveWorkspacePath(path)
 	if err != nil {
 		return err
 	}
-	if err := b.storage.KV.RemoveVirtualFolderMembership(normalizedPath, folderID); err != nil {
+	if err := b.storage.KV.RemoveVirtualFolderMembership(resolvedPath.CanonicalPath, folderID); err != nil {
 		return err
 	}
 	if b.syncEngine != nil {
-		return b.syncEngine.SyncPath(b.rootIDForPath(normalizedPath), filepath.FromSlash(normalizedPath))
+		return b.syncEngine.SyncPath(resolvedPath.RootID, filepath.FromSlash(resolvedPath.CanonicalPath))
 	}
 	return nil
 }
@@ -379,35 +447,34 @@ func (b *Bridge) CreateVirtualFile(folderID string, name string, parentPath stri
 	if folder == nil {
 		return nil, fmt.Errorf("virtual folder not found")
 	}
-	targetPath, rootID, err := resolveCreateTarget(cfg, parentPath, preferredRootID, folder)
+	targetPath, _, err := resolveCreateTarget(cfg, parentPath, preferredRootID, folder)
 	if err != nil {
 		return nil, err
 	}
-	fullPath := filepath.Join(filepath.FromSlash(targetPath), name)
-	if err := os.WriteFile(fullPath, []byte(""), 0644); err != nil {
-		return nil, err
-	}
-	normalizedPath, err := pathutil.NormalizePath(fullPath)
+	resolvedTarget, err := resolveWorkspacePath(cfg, filepath.Join(filepath.FromSlash(targetPath), name), resolvePathOptions{AllowMissingLeaf: true})
 	if err != nil {
 		return nil, err
 	}
-	if err := b.storage.KV.AddVirtualFolderMembership(normalizedPath, folderID); err != nil {
+	if err := os.WriteFile(filepath.FromSlash(resolvedTarget.CanonicalPath), []byte(""), 0644); err != nil {
 		return nil, err
 	}
-	if err := b.updateVirtualFolderTarget(folderID, normalizedPath, rootID); err != nil {
+	if err := b.storage.KV.AddVirtualFolderMembership(resolvedTarget.CanonicalPath, folderID); err != nil {
+		return nil, err
+	}
+	if err := b.updateVirtualFolderTarget(folderID, resolvedTarget.CanonicalPath, resolvedTarget.RootID); err != nil {
 		return nil, err
 	}
 	if b.syncEngine != nil {
-		if err := b.syncEngine.SyncPath(rootID, fullPath); err != nil {
+		if err := b.syncEngine.SyncPath(resolvedTarget.RootID, filepath.FromSlash(resolvedTarget.CanonicalPath)); err != nil {
 			return nil, err
 		}
 	}
-	_ = b.RecordRecentItem(normalizedPath)
+	_ = b.RecordRecentItem(resolvedTarget.CanonicalPath)
 
 	return &SearchHit{
-		Path:             normalizedPath,
+		Path:             resolvedTarget.CanonicalPath,
 		Name:             name,
-		RootID:           rootID,
+		RootID:           resolvedTarget.RootID,
 		VirtualFolderIDs: []string{folderID},
 		MatchKind:        "name",
 		Extension:        filepath.Ext(name),
@@ -415,7 +482,18 @@ func (b *Bridge) CreateVirtualFile(folderID string, name string, parentPath stri
 }
 
 func (b *Bridge) SearchFiles(options SearchOptions) ([]SearchHit, error) {
-	iter, err := b.storage.Index.SearchDocuments(context.Background(), options.Keyword, 300)
+	if normalizeSearchMatchField(options.MatchField) == "content" && options.CaseSensitive {
+		return nil, fmt.Errorf("case-sensitive content search is not supported")
+	}
+
+	documents, err := b.storage.Index.SearchDocumentsWithQuery(context.Background(), storage.SearchQuery{
+		Keyword:         strings.TrimSpace(options.Keyword),
+		Limit:           searchResultLimit(options),
+		Fields:          searchQueryFields(options),
+		RootID:          options.RootID,
+		VirtualFolderID: options.VirtualFolderID,
+		Extension:       normalizeSearchExtension(options.AutoCategory),
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -435,40 +513,28 @@ func (b *Bridge) SearchFiles(options SearchOptions) ([]SearchHit, error) {
 		score int
 	}
 
-	match, err := iter.Next()
-	for err == nil && match != nil {
-		var hit SearchHit
-		hit.VirtualFolderIDs = []string{}
-		_ = match.VisitStoredFields(func(field string, value []byte) bool {
-			switch field {
-			case "_id", "path":
-				hit.Path = string(value)
-			case "name":
-				hit.Name = string(value)
-			case "root_id":
-				hit.RootID = string(value)
-			case "ext":
-				hit.Extension = string(value)
-			case "virtual_folder":
-				hit.VirtualFolderIDs = append(hit.VirtualFolderIDs, string(value))
-			}
-			return true
-		})
+	for _, doc := range documents {
+		hit := SearchHit{
+			Path:             doc.Path,
+			Name:             doc.Name,
+			RootID:           doc.RootID,
+			VirtualFolderIDs: append([]string{}, doc.VirtualFolderIDs...),
+			Extension:        doc.Extension,
+		}
 		if hit.Path == "" {
-			match, err = iter.Next()
 			continue
 		}
 		if options.RootID != "" && hit.RootID != options.RootID {
-			match, err = iter.Next()
 			continue
 		}
 		if options.VirtualFolderID != "" && !containsString(hit.VirtualFolderIDs, options.VirtualFolderID) {
-			match, err = iter.Next()
+			continue
+		}
+		if options.AutoCategory != "" && !searchTypeMatches(hit.Extension, options.AutoCategory) {
 			continue
 		}
 		ok, matchKind := b.matchesSearchHit(hit, options)
 		if !ok {
-			match, err = iter.Next()
 			continue
 		}
 		hit.MatchKind = matchKind
@@ -477,7 +543,6 @@ func (b *Bridge) SearchFiles(options SearchOptions) ([]SearchHit, error) {
 			hit   SearchHit
 			score int
 		}{hit: hit, score: score})
-		match, err = iter.Next()
 	}
 
 	sort.SliceStable(scored, func(i, j int) bool {
@@ -493,12 +558,415 @@ func (b *Bridge) SearchFiles(options SearchOptions) ([]SearchHit, error) {
 	return results, nil
 }
 
+func (b *Bridge) buildArchiveBrowseFiles(
+	cfg *config.AppConfig,
+	metas []storage.FileMeta,
+	memberships map[string][]string,
+	request ArchiveBrowseRequest,
+	recentAccess map[string]int64,
+) ([]ArchiveBrowseFile, error) {
+	sourceKind := normalizeArchiveSourceKind(request.SourceKind)
+	sourceID := strings.TrimSpace(request.SourceID)
+	if sourceKind == "" || sourceID == "" {
+		return []ArchiveBrowseFile{}, nil
+	}
+
+	candidates := make([]ArchiveBrowseFile, 0, len(metas))
+	for _, meta := range metas {
+		folderIDs := memberships[meta.Path]
+		if !archiveMetaInSource(sourceKind, sourceID, meta, folderIDs) {
+			continue
+		}
+		candidates = append(candidates, archiveBrowseFileFromMeta(meta, folderIDs, cfg.Workspace.Roots, recentAccess[meta.Path]))
+	}
+
+	query := strings.TrimSpace(request.Query)
+	if query == "" {
+		return candidates, nil
+	}
+
+	if normalizeArchiveSearchMode(request.SearchMode) != "content" {
+		filtered := make([]ArchiveBrowseFile, 0, len(candidates))
+		for _, file := range candidates {
+			if ok, matchKind := matchArchiveBrowseQuickSearch(file, query); ok {
+				file.MatchKind = matchKind
+				filtered = append(filtered, file)
+			}
+		}
+		return filtered, nil
+	}
+
+	searchOptions := SearchOptions{
+		Keyword:    query,
+		RootID:     "",
+		MatchField: "content",
+		Limit:      maxInt(len(candidates), request.Cursor+normalizedArchivePageSize(request.PageSize)+1),
+	}
+	if sourceKind == "virtual_folder" {
+		searchOptions.VirtualFolderID = sourceID
+	} else {
+		searchOptions.AutoCategory = sourceID
+	}
+	results, err := b.SearchFiles(searchOptions)
+	if err != nil {
+		return nil, err
+	}
+
+	matches := map[string]string{}
+	for _, hit := range results {
+		matches[hit.Path] = hit.MatchKind
+	}
+
+	filtered := make([]ArchiveBrowseFile, 0, len(results))
+	for _, file := range candidates {
+		matchKind, ok := matches[file.Path]
+		if !ok {
+			continue
+		}
+		file.MatchKind = matchKind
+		filtered = append(filtered, file)
+	}
+	return filtered, nil
+}
+
+func buildArchiveBrowseResponse(files []ArchiveBrowseFile, request ArchiveBrowseRequest) *ArchiveBrowseResponse {
+	folderPath := normalizeArchiveFolderPath(request.FolderPath)
+	currentSegments := splitArchivePath(folderPath)
+	directoryCounts := map[string]int{}
+	currentFiles := make([]ArchiveBrowseFile, 0, len(files))
+
+	for _, file := range files {
+		fileDirectory := normalizeArchiveFolderPath(file.Directory)
+		folderSegments := splitArchivePath(fileDirectory)
+		if !archiveFolderHasPrefix(folderSegments, currentSegments) {
+			continue
+		}
+		if len(folderSegments) > len(currentSegments) {
+			nextDirectory := joinArchiveFolderPath(folderPath, folderSegments[len(currentSegments)])
+			directoryCounts[nextDirectory]++
+			continue
+		}
+		currentFiles = append(currentFiles, file)
+	}
+
+	folders := make([]ArchiveBrowseFolder, 0, len(directoryCounts))
+	for path, count := range directoryCounts {
+		folders = append(folders, ArchiveBrowseFolder{
+			Name:  archiveFolderBaseName(path),
+			Path:  path,
+			Count: count,
+		})
+	}
+	sort.SliceStable(folders, func(i, j int) bool {
+		return strings.ToLower(folders[i].Name) < strings.ToLower(folders[j].Name)
+	})
+
+	sortArchiveBrowseFiles(currentFiles, request.SortBy, request.SortDirection)
+	pageSize := normalizedArchivePageSize(request.PageSize)
+	cursor := request.Cursor
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(currentFiles) {
+		cursor = len(currentFiles)
+	}
+	end := cursor + pageSize
+	nextCursor := -1
+	if end < len(currentFiles) {
+		nextCursor = end
+	} else {
+		end = len(currentFiles)
+	}
+
+	pagedFiles := append([]ArchiveBrowseFile(nil), currentFiles[cursor:end]...)
+	return &ArchiveBrowseResponse{
+		Folders:           folders,
+		Files:             pagedFiles,
+		TotalFiles:        len(currentFiles),
+		TotalFolders:      len(folders),
+		NextCursor:        nextCursor,
+		CurrentFolderPath: folderPath,
+	}
+}
+
+func archiveMetaInSource(sourceKind string, sourceID string, meta storage.FileMeta, folderIDs []string) bool {
+	switch sourceKind {
+	case "virtual_folder":
+		return containsString(folderIDs, sourceID)
+	case "auto_category":
+		return normalizeSearchExtension(meta.Extension) == normalizeSearchExtension(sourceID)
+	default:
+		return false
+	}
+}
+
+func archiveBrowseFileFromMeta(meta storage.FileMeta, folderIDs []string, roots []config.WorkspaceRoot, lastOpenedAt int64) ArchiveBrowseFile {
+	relativePath := archiveBrowseRelativePath(meta.Path, meta.RootID, roots)
+	return ArchiveBrowseFile{
+		Path:             meta.Path,
+		Name:             meta.Name,
+		RootID:           meta.RootID,
+		VirtualFolderIDs: append([]string{}, folderIDs...),
+		MatchKind:        "name",
+		Extension:        meta.Extension,
+		RelativePath:     relativePath,
+		Directory:        archiveBrowseDirectory(relativePath),
+		ModifiedAt:       meta.Modified,
+		LastOpenedAt:     lastOpenedAt,
+	}
+}
+
+func archiveBrowseRelativePath(path string, rootID string, roots []config.WorkspaceRoot) string {
+	normalizedPath := filepath.ToSlash(path)
+	var root *config.WorkspaceRoot
+	for idx := range roots {
+		if roots[idx].ID == rootID {
+			root = &roots[idx]
+			break
+		}
+	}
+	if root == nil {
+		return archiveFolderBaseName(normalizedPath)
+	}
+
+	rootPath := strings.TrimRight(filepath.ToSlash(root.Path), "/")
+	if rootPath == "" {
+		rootPath = "/"
+	}
+	rootPathLower := normalizeRootBoundary(root.Path)
+	normalizedPathLower := strings.ToLower(normalizedPath)
+	relativePath := archiveFolderBaseName(normalizedPath)
+	switch {
+	case normalizedPathLower == rootPathLower:
+		relativePath = root.Label
+	case rootPathLower == "/" && strings.HasPrefix(normalizedPathLower, "/"):
+		relativePath = strings.TrimPrefix(normalizedPath, "/")
+	case strings.HasPrefix(normalizedPathLower, rootPathLower+"/"):
+		relativePath = strings.TrimPrefix(normalizedPath, rootPath+"/")
+	}
+	if len(roots) > 1 {
+		return joinArchiveFolderPath(root.Label, relativePath)
+	}
+	return relativePath
+}
+
+func archiveBrowseDirectory(relativePath string) string {
+	directory := filepath.ToSlash(filepath.Dir(relativePath))
+	if directory == "." {
+		return ""
+	}
+	return normalizeArchiveFolderPath(directory)
+}
+
+func matchArchiveBrowseQuickSearch(file ArchiveBrowseFile, query string) (bool, string) {
+	needle := strings.TrimSpace(query)
+	if needle == "" {
+		return true, "name"
+	}
+	extension := strings.TrimPrefix(strings.ToLower(file.Extension), ".")
+	normalizedNeedle := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(query)), ".")
+
+	if searchSmartMatch(file.Name, needle, false) {
+		return true, "name"
+	}
+	if file.Directory != "" && searchSmartMatch(file.Directory, needle, false) {
+		return true, "directory"
+	}
+	if extension != "" && (extension == normalizedNeedle || strings.Contains(extension, normalizedNeedle)) {
+		return true, "type"
+	}
+	if searchSmartMatch(file.RelativePath, needle, false) {
+		return true, "path"
+	}
+	return false, ""
+}
+
+func normalizeArchiveSourceKind(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "virtual_folder":
+		return "virtual_folder"
+	case "auto_category":
+		return "auto_category"
+	default:
+		return ""
+	}
+}
+
+func normalizeArchiveSearchMode(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), "content") {
+		return "content"
+	}
+	return "quick"
+}
+
+func normalizeArchiveFolderPath(value string) string {
+	value = strings.TrimSpace(strings.ReplaceAll(value, "\\", "/"))
+	value = strings.Trim(value, "/")
+	if value == "." {
+		return ""
+	}
+	return value
+}
+
+func normalizedArchivePageSize(pageSize int) int {
+	if pageSize <= 0 {
+		return 80
+	}
+	if pageSize > 500 {
+		return 500
+	}
+	return pageSize
+}
+
+func splitArchivePath(path string) []string {
+	normalized := normalizeArchiveFolderPath(path)
+	if normalized == "" {
+		return []string{}
+	}
+	return strings.Split(normalized, "/")
+}
+
+func archiveFolderHasPrefix(folderSegments []string, currentSegments []string) bool {
+	if len(currentSegments) > len(folderSegments) {
+		return false
+	}
+	for idx := range currentSegments {
+		if folderSegments[idx] != currentSegments[idx] {
+			return false
+		}
+	}
+	return true
+}
+
+func joinArchiveFolderPath(base string, segment string) string {
+	base = normalizeArchiveFolderPath(base)
+	segment = normalizeArchiveFolderPath(segment)
+	switch {
+	case base == "":
+		return segment
+	case segment == "":
+		return base
+	default:
+		return base + "/" + segment
+	}
+}
+
+func archiveFolderBaseName(path string) string {
+	normalized := normalizeArchiveFolderPath(path)
+	if normalized == "" {
+		return ""
+	}
+	parts := strings.Split(normalized, "/")
+	return parts[len(parts)-1]
+}
+
+func sortArchiveBrowseFiles(files []ArchiveBrowseFile, sortBy string, sortDirection string) {
+	sortBy = normalizeArchiveSortBy(sortBy)
+	direction := normalizeArchiveSortDirection(sortDirection)
+	sort.SliceStable(files, func(i, j int) bool {
+		cmp := compareArchiveBrowseFiles(files[i], files[j], sortBy)
+		if cmp == 0 {
+			cmp = compareArchiveBrowseFiles(files[i], files[j], "name")
+		}
+		if cmp == 0 {
+			cmp = strings.Compare(strings.ToLower(files[i].RelativePath), strings.ToLower(files[j].RelativePath))
+		}
+		if direction == "desc" {
+			return cmp > 0
+		}
+		return cmp < 0
+	})
+}
+
+func compareArchiveBrowseFiles(left ArchiveBrowseFile, right ArchiveBrowseFile, sortBy string) int {
+	switch sortBy {
+	case "modified":
+		return compareInt64(left.ModifiedAt, right.ModifiedAt)
+	case "lastOpened":
+		return compareInt64(left.LastOpenedAt, right.LastOpenedAt)
+	case "type":
+		if cmp := strings.Compare(strings.ToLower(left.Extension), strings.ToLower(right.Extension)); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(strings.ToLower(left.Name), strings.ToLower(right.Name))
+	case "directory":
+		if cmp := strings.Compare(strings.ToLower(left.Directory), strings.ToLower(right.Directory)); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(strings.ToLower(left.Name), strings.ToLower(right.Name))
+	default:
+		return strings.Compare(strings.ToLower(left.Name), strings.ToLower(right.Name))
+	}
+}
+
+func normalizeArchiveSortBy(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "modified":
+		return "modified"
+	case "lastopened":
+		return "lastOpened"
+	case "type":
+		return "type"
+	case "directory":
+		return "directory"
+	default:
+		return "name"
+	}
+}
+
+func normalizeArchiveSortDirection(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), "desc") {
+		return "desc"
+	}
+	return "asc"
+}
+
+func compareInt64(left int64, right int64) int {
+	switch {
+	case left < right:
+		return -1
+	case left > right:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func maxInt(left int, right int) int {
+	if left > right {
+		return left
+	}
+	return right
+}
+func searchResultLimit(options SearchOptions) int {
+	if options.Limit > 0 {
+		return options.Limit
+	}
+	return 500
+}
+func searchQueryFields(options SearchOptions) []string {
+	switch normalizeSearchMatchField(options.MatchField) {
+	case "name":
+		return []string{"name"}
+	case "path", "directory":
+		return []string{"path_text"}
+	case "content":
+		return []string{"body"}
+	case "type":
+		return []string{"path_text"}
+	default:
+		if options.CaseSensitive {
+			return []string{"name", "path_text"}
+		}
+		return []string{"name", "path_text", "body"}
+	}
+}
 func (b *Bridge) RecordRecentItem(path string) error {
 	cfg, err := b.storage.KV.GetAppConfig()
 	if err != nil {
 		return err
 	}
-	normalizedPath, err := pathutil.NormalizePath(path)
+	normalizedPath, err := canonicalizeMaybeMissingPath(path, false)
 	if err != nil {
 		return err
 	}
@@ -653,8 +1121,9 @@ func (b *Bridge) rootIDForPath(path string) string {
 	if err != nil {
 		return ""
 	}
-	if rootID := rootIDForPath(cfg, path); rootID != "" {
-		return rootID
+	resolvedPath, err := resolveWorkspacePath(cfg, path, resolvePathOptions{AllowMissingLeaf: true})
+	if err == nil {
+		return resolvedPath.RootID
 	}
 	return cfg.Workspace.ActiveRootID
 }
@@ -717,11 +1186,13 @@ func smartKeywordScore(keyword string, hit SearchHit, matchField string, caseSen
 	extension := normalizeSearchExtension(hit.Extension)
 	keywordNormalized := normalizeSearchValue(keyword, caseSensitive)
 	matchField = normalizeSearchMatchField(matchField)
+	baseName := strings.TrimSuffix(name, extension)
+	tokens := searchKeywordTokensNormalized(keywordNormalized)
 	score := 0
 
 	if name == keywordNormalized {
 		score += 240
-	} else if strings.TrimSuffix(name, extension) == keywordNormalized {
+	} else if baseName == keywordNormalized {
 		score += 220
 	}
 
@@ -755,13 +1226,39 @@ func smartKeywordScore(keyword string, hit SearchHit, matchField string, caseSen
 	if isSubsequence(path, keywordNormalized) {
 		score += 24
 	}
+	if len(tokens) > 1 {
+		if allSearchTokensMatch(baseName, tokens) {
+			score += 150
+		}
+		if allSearchTokensMatch(name, tokens) {
+			score += 110
+		}
+		if allSearchTokensMatch(directory, tokens) {
+			score += 72
+		}
+		if allSearchTokensMatch(path, tokens) {
+			score += 64
+		}
+	}
 
-	for _, token := range strings.FieldsFunc(keywordNormalized, splitSearchToken) {
+	for _, token := range tokens {
 		if token == "" {
 			continue
 		}
+		if strings.HasPrefix(name, token) {
+			score += 24
+		}
 		if strings.Contains(name, token) {
 			score += 18
+		}
+		if strings.HasPrefix(directory, token) {
+			score += 12
+		}
+		if strings.Contains(directory, token) {
+			score += 10
+		}
+		if strings.HasPrefix(path, token) {
+			score += 12
 		}
 		if strings.Contains(path, token) {
 			score += 10
@@ -782,6 +1279,55 @@ func splitSearchToken(r rune) bool {
 	default:
 		return true
 	}
+}
+
+func searchKeywordTokensNormalized(keyword string) []string {
+	rawTokens := strings.FieldsFunc(strings.TrimSpace(keyword), splitSearchToken)
+	if len(rawTokens) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(rawTokens))
+	seen := map[string]bool{}
+	for _, token := range rawTokens {
+		token = strings.TrimSpace(token)
+		if len(token) < 2 || seen[token] {
+			continue
+		}
+		seen[token] = true
+		out = append(out, token)
+	}
+	return out
+}
+
+func allSearchTokensMatch(text string, tokens []string) bool {
+	if len(tokens) == 0 {
+		return false
+	}
+	for _, token := range tokens {
+		if !strings.Contains(text, token) && !isSubsequence(text, token) {
+			return false
+		}
+	}
+	return true
+}
+
+func searchSmartMatch(haystack string, needle string, caseSensitive bool) bool {
+	if searchContains(haystack, needle, caseSensitive) {
+		return true
+	}
+	left := normalizeSearchValue(haystack, caseSensitive)
+	right := normalizeSearchValue(strings.TrimSpace(needle), caseSensitive)
+	if right == "" {
+		return true
+	}
+	if isSubsequence(left, right) {
+		return true
+	}
+	tokens := searchKeywordTokensNormalized(right)
+	if len(tokens) <= 1 {
+		return false
+	}
+	return allSearchTokensMatch(left, tokens)
 }
 
 func isSubsequence(text string, query string) bool {
@@ -886,48 +1432,33 @@ func (b *Bridge) matchesSearchHit(hit SearchHit, options SearchOptions) (bool, s
 
 	switch matchField {
 	case "name":
-		return searchContains(name, keyword, options.CaseSensitive), "name"
+		return searchSmartMatch(name, keyword, options.CaseSensitive), "name"
 	case "path":
-		return searchContains(path, keyword, options.CaseSensitive), "path"
+		return searchSmartMatch(path, keyword, options.CaseSensitive), "path"
 	case "directory":
-		return searchContains(directory, keyword, options.CaseSensitive), "directory"
+		return searchSmartMatch(directory, keyword, options.CaseSensitive), "directory"
 	case "type":
 		return searchTypeMatches(extension, keyword), "type"
 	case "content":
-		if options.CaseSensitive {
-			return b.fileContainsKeyword(hit.Path, keyword, true), "content"
-		}
 		return true, "content"
 	default:
-		if searchContains(name, keyword, options.CaseSensitive) {
+		if searchSmartMatch(name, keyword, options.CaseSensitive) {
 			return true, "name"
 		}
-		if searchContains(directory, keyword, options.CaseSensitive) {
+		if searchSmartMatch(directory, keyword, options.CaseSensitive) {
 			return true, "directory"
 		}
 		if searchTypeMatches(extension, keyword) {
 			return true, "type"
 		}
-		if searchContains(path, keyword, options.CaseSensitive) {
+		if searchSmartMatch(path, keyword, options.CaseSensitive) {
 			return true, "path"
 		}
 		if options.CaseSensitive {
-			return b.fileContainsKeyword(hit.Path, keyword, true), "content"
+			return false, ""
 		}
 		return true, "content"
 	}
-}
-
-func (b *Bridge) fileContainsKeyword(path string, keyword string, caseSensitive bool) bool {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	content := string(data)
-	if caseSensitive {
-		return strings.Contains(content, keyword)
-	}
-	return strings.Contains(strings.ToLower(content), strings.ToLower(keyword))
 }
 
 func defaultHelpDocs() []HelpDoc {
@@ -937,11 +1468,11 @@ func defaultHelpDocs() []HelpDoc {
 	}
 }
 
-func readableHelpDocs() []HelpDoc {
+func (b *Bridge) readableHelpDocs() []HelpDoc {
 	docs := defaultHelpDocs()
 	filtered := make([]HelpDoc, 0, len(docs))
 	for _, doc := range docs {
-		if _, err := readHelpDoc(doc.ID); err == nil {
+		if _, err := b.readHelpDoc(doc.ID); err == nil {
 			filtered = append(filtered, doc)
 		}
 	}
@@ -959,7 +1490,16 @@ func helpDocPath(docID string) (string, error) {
 	}
 }
 
-func readHelpDoc(docID string) ([]byte, error) {
+func (b *Bridge) readHelpDoc(docID string) ([]byte, error) {
+	if b.readHelp != nil {
+		if data, err := b.readHelp(docID); err == nil {
+			return data, nil
+		}
+	}
+	return readHelpDocFromDisk(docID)
+}
+
+func readHelpDocFromDisk(docID string) ([]byte, error) {
 	docPath, err := helpDocPath(docID)
 	if err != nil {
 		return nil, err
@@ -974,7 +1514,6 @@ func readHelpDoc(docID string) ([]byte, error) {
 	altPath := filepath.Join(filepath.Dir(executablePath), "..", docPath)
 	return os.ReadFile(altPath)
 }
-
 func upsertRecentWorkspace(items []config.RecentWorkspace, path string, label string) []config.RecentWorkspace {
 	now := time.Now().Unix()
 	next := []config.RecentWorkspace{{

@@ -71,6 +71,40 @@ export interface SearchHit {
 	extension: string;
 }
 
+export interface ArchiveBrowseFolder {
+	name: string;
+	path: string;
+	count: number;
+}
+
+export interface ArchiveBrowseFile extends SearchHit {
+	relativePath: string;
+	directory: string;
+	modifiedAt: number;
+	lastOpenedAt: number;
+}
+
+export interface ArchiveBrowseRequest {
+	sourceKind: 'virtual_folder' | 'auto_category';
+	sourceId: string;
+	folderPath: string;
+	query: string;
+	searchMode: 'quick' | 'content';
+	sortBy: 'name' | 'modified' | 'lastOpened' | 'type' | 'directory';
+	sortDirection: 'asc' | 'desc';
+	pageSize: number;
+	cursor: number;
+}
+
+export interface ArchiveBrowseResponse {
+	folders: ArchiveBrowseFolder[];
+	files: ArchiveBrowseFile[];
+	totalFiles: number;
+	totalFolders: number;
+	nextCursor: number;
+	currentFolderPath: string;
+}
+
 export interface HelpDoc {
 	id: string;
 	title: string;

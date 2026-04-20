@@ -38,7 +38,7 @@ func New(readHelp func(string) ([]byte, error)) (*Server, error) {
 	}
 
 	syncEngine := sync.NewSyncEngine(storageManager)
-	bridgeSvc := bridge.NewBridge(storageManager, syncEngine)
+	bridgeSvc := bridge.NewBridge(storageManager, syncEngine, readHelp)
 	server := &Server{
 		Bridge:     bridgeSvc,
 		storage:    storageManager,
@@ -104,6 +104,10 @@ func (s *Server) startHTTP() error {
 			http.Error(w, "invalid file path", http.StatusBadRequest)
 			return
 		}
+		if strings.Contains(filePath, "..") {
+			http.Error(w, "forbidden path traversal", http.StatusForbidden)
+			return
+		}
 		normalizedPath, err := s.Bridge.NormalizeWorkspacePath(filePath)
 		if err != nil {
 			http.Error(w, "file not accessible", http.StatusForbidden)
@@ -115,6 +119,10 @@ func (s *Server) startHTTP() error {
 		filePath, err := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/render/"))
 		if err != nil {
 			http.Error(w, "invalid file path", http.StatusBadRequest)
+			return
+		}
+		if strings.Contains(filePath, "..") {
+			http.Error(w, "forbidden path traversal", http.StatusForbidden)
 			return
 		}
 		normalizedPath, err := s.Bridge.NormalizeWorkspacePath(filePath)

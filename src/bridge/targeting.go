@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"arkkb/src/core/config"
 	coreSync "arkkb/src/core/sync"
@@ -99,15 +98,18 @@ func normalizeExistingDirectory(cfg *config.AppConfig, path string) (string, str
 		}
 	}
 
-	rootID := rootIDForPath(cfg, normalizedPath)
-	if rootID == "" {
-		return "", "", fmt.Errorf("path %s is outside the workspace", normalizedPath)
+	resolvedPath, err := resolveWorkspacePath(cfg, normalizedPath, resolvePathOptions{})
+	if err != nil {
+		return "", "", err
 	}
-	rootPath := rootPathByID(cfg, rootID)
-	if coreSync.IsDirectoryBlocked(rootPath, filepath.FromSlash(normalizedPath), cfg.Policy) {
-		return "", "", fmt.Errorf("path %s is blocked by policy", normalizedPath)
+	rootPath := rootPathByID(cfg, resolvedPath.RootID)
+	if canonicalRoot, rootErr := canonicalizeMaybeMissingPath(rootPath, true); rootErr == nil {
+		rootPath = canonicalRoot
 	}
-	return normalizedPath, rootID, nil
+	if coreSync.IsDirectoryBlocked(filepath.FromSlash(rootPath), filepath.FromSlash(resolvedPath.CanonicalPath), cfg.Policy) {
+		return "", "", fmt.Errorf("path %s is blocked by policy", resolvedPath.CanonicalPath)
+	}
+	return resolvedPath.CanonicalPath, resolvedPath.RootID, nil
 }
 
 func existingDirectory(path string) bool {
@@ -116,18 +118,11 @@ func existingDirectory(path string) bool {
 }
 
 func rootIDForPath(cfg *config.AppConfig, path string) string {
-	normalizedPath, err := pathutil.NormalizePath(path)
+	resolvedPath, err := resolveWorkspacePath(cfg, path, resolvePathOptions{AllowMissingLeaf: true})
 	if err != nil {
 		return ""
 	}
-	lowerPath := strings.ToLower(filepath.ToSlash(normalizedPath))
-	for _, root := range cfg.Workspace.Roots {
-		lowerRoot := strings.ToLower(filepath.ToSlash(root.Path))
-		if lowerPath == lowerRoot || strings.HasPrefix(lowerPath, lowerRoot+"/") {
-			return root.ID
-		}
-	}
-	return ""
+	return resolvedPath.RootID
 }
 
 func rootPathByID(cfg *config.AppConfig, rootID string) string {

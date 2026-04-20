@@ -4,3 +4,5 @@ dist/
 ~/.arkkb/
 node_modules/
 .DS_Store
+arkkb-sidecar
+frontend/src-tauri/target/
